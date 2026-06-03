@@ -47,18 +47,27 @@ def audio_embedding_prepare(data_rootpath="audio_downstream/Coswara", model_name
 
     save_remark = remark if len(remark) > 0 else model_name
 
+   
+
+    # resolve paths from this file location (instead of root_prefix)
+    current_file_dir = os.path.dirname(os.path.abspath(__file__))
+    project_root = os.path.dirname(current_file_dir)  # .../NormWear
+    base_data_dir = os.path.normpath(os.path.join(project_root, "data", data_rootpath))
+    sample_dir = os.path.join(base_data_dir, "sample_for_downstream")
+    embed_dir = os.path.join(base_data_dir, f"{save_remark}_wav_embed")
+
     # initialize folder for save all the embedding
-    os.makedirs('{}data/{}/{}_wav_embed'.format(root_prefix, data_rootpath, save_remark), exist_ok=True)
+    os.makedirs(embed_dir, exist_ok=True)
 
     # get embedding for each sample
-    for fn in tqdm(sorted(os.listdir('{}data/{}/sample_for_downstream'.format(root_prefix, data_rootpath)))):
+    for fn in tqdm(sorted(os.listdir(sample_dir))):
         # edge case
         if fn[0] == '.':
             continue
         
         # load sample
         # read data
-        with open(os.path.join('{}data/{}/sample_for_downstream'.format(root_prefix, data_rootpath), fn), 'rb') as f:
+        with open(os.path.join(sample_dir, fn), 'rb') as f:
             sample = pickle.load(f) # ['uid', 'data', 'label', 'sampling_rate']
         
         # expand 1 dimension if only single dimension
@@ -89,7 +98,7 @@ def audio_embedding_prepare(data_rootpath="audio_downstream/Coswara", model_name
         # exit()
         
         # save the embedding
-        with open(os.path.join('{}data/{}/{}_wav_embed'.format(root_prefix, data_rootpath, save_remark), fn), 'wb') as f:
+        with open(os.path.join(embed_dir, fn), 'wb') as f:
             pickle.dump({
                 "uid": sample["uid"], 
                 "sampling_rate": sample['sampling_rate'], 
@@ -98,24 +107,30 @@ def audio_embedding_prepare(data_rootpath="audio_downstream/Coswara", model_name
             }, f)
 
 def combine_normwear_ast(data_rootpath="audio_downstream/Coswara", root_prefix="../"):
+    base_data_dir = os.path.normpath(os.path.join(root_prefix, "data", data_rootpath))
+    sample_dir = os.path.join(base_data_dir, "sample_for_downstream")
+    normwear_dir = os.path.join(base_data_dir, "normwear_wav_embed")
+    ast_dir = os.path.join(base_data_dir, "ast_wav_embed")
+    combine_dir = os.path.join(base_data_dir, "nacombine_wav_embed")
+
     # initialize folder for save all the embedding
-    os.makedirs('{}data/{}/nacombine_wav_embed'.format(root_prefix, data_rootpath), exist_ok=True)
+    os.makedirs(combine_dir, exist_ok=True)
 
     # get embedding for each sample
-    for fn in tqdm(sorted(os.listdir('{}data/{}/sample_for_downstream'.format(root_prefix, data_rootpath)))):
+    for fn in tqdm(sorted(os.listdir(sample_dir))):
         # edge case
         if fn[0] == '.':
             continue
         
         # load sample
         # read data
-        with open(os.path.join('{}data/{}/sample_for_downstream'.format(root_prefix, data_rootpath), fn), 'rb') as f:
+        with open(os.path.join(sample_dir, fn), 'rb') as f:
             sample = pickle.load(f) # ['uid', 'data', 'label', 'sampling_rate']
         
         # TODO combine embeds
-        with open(os.path.join('{}data/{}/normwear_wav_embed'.format(root_prefix, data_rootpath), fn), 'rb') as f:
+        with open(os.path.join(normwear_dir, fn), 'rb') as f:
             normwear_embed = pickle.load(f)["embed"]
-        with open(os.path.join('{}data/{}/ast_wav_embed'.format(root_prefix, data_rootpath), fn), 'rb') as f:
+        with open(os.path.join(ast_dir, fn), 'rb') as f:
             ast_embed = pickle.load(f)["embed"]
         embed = np.concatenate((normwear_embed, ast_embed), axis=0)
 
@@ -125,7 +140,7 @@ def combine_normwear_ast(data_rootpath="audio_downstream/Coswara", root_prefix="
         # exit()
         
         # save the embedding
-        with open(os.path.join('{}data/{}/nacombine_wav_embed'.format(root_prefix, data_rootpath), fn), 'wb') as f:
+        with open(os.path.join(combine_dir, fn), 'wb') as f:
             pickle.dump({
                 "uid": sample["uid"], 
                 "sampling_rate": sample['sampling_rate'], 

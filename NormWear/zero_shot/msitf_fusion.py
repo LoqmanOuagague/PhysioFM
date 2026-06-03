@@ -4,9 +4,16 @@ import torch
 import torch.nn as nn
 import torch.functional as F
 from transformers import AutoTokenizer, AutoModelForCausalLM
-
+from dotenv import load_dotenv
 from ..main_model import *
 from .sentence_template import *
+
+load_dotenv()
+def _resolve_tinyllama_path():
+    env_path = os.getenv("TINYLLAMA_PATH")
+    if env_path:
+        return os.path.abspath(os.path.expanduser(env_path))
+    return "muzammil-eds/tinyllama-2.5T-Clinical-v2"
 
 # Basic Module
 def freeze_model(model):
@@ -225,8 +232,9 @@ class NormWearZeroShot(nn.Module):
         self.rel_only = rel_only
 
         # text encoder
-        self.tokenizer = AutoTokenizer.from_pretrained("muzammil-eds/tinyllama-2.5T-Clinical-v2")
-        self.nlp_model = freeze_model(AutoModelForCausalLM.from_pretrained("muzammil-eds/tinyllama-2.5T-Clinical-v2"))
+        tinyllama_path = _resolve_tinyllama_path()
+        self.tokenizer = AutoTokenizer.from_pretrained(tinyllama_path)
+        self.nlp_model = freeze_model(AutoModelForCausalLM.from_pretrained(tinyllama_path))
         self.query_size = 2048
 
         # sensor encoder

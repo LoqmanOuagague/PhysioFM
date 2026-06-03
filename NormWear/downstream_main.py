@@ -36,8 +36,7 @@ if __name__ == '__main__':
             "wearable_downstream/wesad", # ***
         ],
         1: [ # if test a subset of the tasks, specified them here, e.g.:
-            "wearable_downstream/PPG_CVD",
-            "wearable_downstream/ppg_hgb", 
+            "wesad",
         ]
     }
 

@@ -5,7 +5,7 @@ import numpy as np
 import torch.nn as nn
 from scipy import signal
 from scipy.ndimage import gaussian_filter
-
+import pywt
 import torchaudio.transforms as T
 
 from transformers import ClapAudioModelWithProjection, ClapProcessor, AutoTokenizer, ClapTextModelWithProjection
@@ -261,8 +261,7 @@ from ..modules.normwear import *
 def wt(ts, lf=0.1, hf=65, wl='gaus1', method='fft'):
     # in: L
     # out: FxL
-    # cwtmatr, freqs = pywt.cwt(ts, np.arange(lf, hf), wl, method=method)
-    cwtmatr = signal.cwt(ts, signal.ricker, np.arange(lf, hf))
+    cwtmatr, _ = pywt.cwt(ts, np.arange(lf, hf), wl, method=method)
     return cwtmatr #[F, L]
 
 def spec_cwt(audio_data): # [nvar, L]
@@ -299,8 +298,9 @@ class NormWear_API(nn.Module):
         # '../data/results/model_mae_checkpoint-140.pth' # 37k
 
         # load pretrained checkpoint
-        stat_dict = torch.load(weight_path, map_location=torch.device('cpu'))['model']
-
+       
+        stat_dict = torch.load(weight_path, map_location=torch.device('cpu'))
+        
         # stat_dict = torch.load('../data/results/model_mae_checkpoint-140.pth', map_location=torch.device('cpu'))['model']
         self.backbone.load_state_dict(stat_dict)
         print("Model load successfull.")

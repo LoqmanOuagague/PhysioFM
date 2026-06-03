@@ -1,5 +1,7 @@
-**.DS_Store
 **/__pycache__/
-
-**/model_ckpts/
-cleaned_model/
+.vscode
+.venv/
+model/*
+job_script.sh
+NormWear/weights/*
+NormWear/data/*

@@ -1,12 +1,12 @@
-from scipy import signal
+import pywt
 import torchaudio.transforms as T
 
 from .modules.normwear import *
 
-def wt(ts, lf=0.1, hf=65):
+def wt(ts, lf=0.1, hf=65, wl='gaus1', method='fft'):
     # in: L
     # out: FxL
-    cwtmatr = signal.cwt(ts, signal.ricker, np.arange(lf, hf))
+    cwtmatr, _ = pywt.cwt(ts, np.arange(lf, hf), wl, method=method)
     return cwtmatr #[F, L]
 
 def spec_cwt(audio_data): # [nvar, L]
