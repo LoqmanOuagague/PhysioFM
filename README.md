@@ -79,10 +79,18 @@ TINYLLAMA_PATH=YOUR_DIRECTORY
 - Requests resources with `#SBATCH` options such as time limit, partition, account, GPUs, and log files.
 - Loads the software stack with `module load`, then activates the virtual environment.
 - Launches zero-shot inference with:
-
-```sh
-CUDA_VISIBLE_DEVICES=0 python3 -m NormWear.zero_shot.zero_shot_inference normwear --dataset wesad --times 3
-```
+    * Normal lauch:
+        ```sh
+        CUDA_VISIBLE_DEVICES=0 python3 -m NormWear.zero_shot.zero_shot_inference normwear --dataset wesad --times 3
+        ```
+    * Lauching with model weights loaded from HuggingFace:
+        ```sh
+        CUDA_VISIBLE_DEVICES=0 python3 -m NormWear.zero_shot.zero_shot_inference_HF normwear --dataset wesad --times 3
+        ```
+    * Lauching with parallelized code (recommended for HPC, much faster results):
+        ```sh
+        CUDA_VISIBLE_DEVICES=0 python3 -m NormWear.zero_shot.zero_shot_inference_parallel normwear --dataset wesad --times 3
+        ```
 
 Before submitting, update the module names, environment name, repository path, and Slurm account values to match your cluster. Then run:
 
