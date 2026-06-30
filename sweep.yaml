@@ -1,0 +1,63 @@
+program: NormWear.downstream_main 
+method: bayes
+metric:
+  goal: maximize
+  name: accuracy
+parameters:
+  model_name:
+    value: normwear
+  
+  model_weight_dir:
+    value: NormWear/weights/normwear_pretrain_ckpt.pth
+  
+  group:
+    value: 1
+  
+  data_path:
+    value: NormWear/data
+  
+  num_runs:
+    value: 1
+  
+  prepare_embed:
+    value: 0
+  
+  remark:
+    value: test_run
+  batch_size:
+    distribution: int_uniform
+    max: 128
+    min: 32
+  decay_rate:
+    distribution: uniform
+    max: 0.9
+    min: 0.05
+  dropout_rate:
+    distribution: uniform
+    max: 0.3
+    min: 0.1
+  epochs:
+    value: 500
+  initial_learning_rate:
+    distribution: uniform
+    max: 0.002
+    min: 0.0005
+  metric:
+    distribution: categorical
+    values:
+    - accuracy
+    - val_accuracy
+  number_of_layer:
+    distribution: int_uniform
+    max: 10
+    min: 3
+  regularization_parameter:
+    distribution: uniform
+    max: 0.2
+    min: 0.005
+command:
+  - ${env}
+  - python
+  - -m
+  - ${program}
+  - ${args}
