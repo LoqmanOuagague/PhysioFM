@@ -34,7 +34,9 @@ from torch.utils.data import DataLoader
 # model and data specific module
 from .engine_zeroshot import train_one_epoch, collate_fn, ZerShotDataset
 from .msitf_fusion import *
-
+from dotenv import load_dotenv
+load_dotenv()
+DEFAULT_MODEL_CKPT = os.getenv("MODEL_CKPT_PATH")
 def get_args_parser():
     parser = argparse.ArgumentParser('MAE pre-training for zero-shot', add_help=False)
     parser.add_argument('--batch_size', default=64, type=int,
@@ -98,6 +100,8 @@ def get_args_parser():
     parser.add_argument('--dist_on_itp', action='store_true')
     parser.add_argument('--dist_url', default='env://',
                         help='url used to set up distributed training')
+    parser.add_argument('--distributed', default=True, type=bool,
+                        help='activate distributed training')
     return parser
 
 
@@ -148,7 +152,7 @@ def main(args):
     
     # define the model
     print("Loading model...")
-    model = NormWearZeroShot()
+    model = NormWearZeroShot(weight_path=DEFAULT_MODEL_CKPT)
 
     model.to(device)
 
