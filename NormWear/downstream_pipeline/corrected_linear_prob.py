@@ -1,4 +1,7 @@
-import time
+
+# ML experimenting
+import wandb
+from wandb.integration.keras import WandbMetricsLogger, WandbModelCheckpoint
 import numpy as np
 # from scipy import stats
 
@@ -7,17 +10,49 @@ from sklearn.multioutput import MultiOutputRegressor
 from sklearn.linear_model import LogisticRegression, Ridge
 from sklearn.metrics import roc_auc_score, average_precision_score, f1_score, balanced_accuracy_score, precision_score, recall_score
 
+import tensorflow as tf
+from tensorflow.keras import Sequential
+from tensorflow.keras.layers import Dense, BatchNormalization,Dropout,Conv1D,MaxPool1D,Flatten,Reshape
+from tensorflow.keras.activations import softmax
 # from sklearn.preprocessing import MinMaxScaler
 
-def linear_prob(
+def linear_prob(args,
     x_train,
     y_train,
     x_test,
     y_test,
     task_type='class',
     random_state=42
-):  
+): 
+    wandb.init(
+    # set the wandb project where this run will be logged
+    project="NormWear full shot",
+
+    # track hyperparameters and run metadata with wandb.config
+    config={
+        "number_of_layer": args.number_of_layer,
+        "metric":  args.metric,
+        "data":"WESAD",
+        "epoch": args.epochs,
+        "batch_size": args.batch_size,
+        "regularization_parameter": args.regularization_parameter,
+        "learning_rate_schedule": "ExponentialDecay",
+        "initial_learning_rate": args.initial_learning_rate,
+        "decay_steps": 1,
+        "decay_rate": args.decay_rate,
+        "staircase":False,
+        "validation_split":0.2,
+        #"seed":23,
+        "dropout_rate": args.dropout_rate
+    }
+    )   
+    config = wandb.config
     # init linear model
+    lr_schedule = tf.keras.optimizers.schedules.ExponentialDecay(
+        initial_learning_rate=config.initial_learning_rate,
+        decay_steps=config.decay_steps,
+        decay_rate=config.decay_rate,staircase=config.staircase)
+    optimizer = tf.keras.optimizers.Adam(lr_schedule)
     if task_type == 'class':
         lp = LogisticRegression(
             max_iter=500,
@@ -31,6 +66,21 @@ def linear_prob(
             # random_state=random_state,
             # class_weight='balanced'
         )
+        lp = Sequential()
+       
+        for i in range(0, config.number_of_layer - 2):
+            lp.add(Dense(units=2**(config.number_of_layer-i), activation="relu", kernel_regularizer=tf.keras.regularizers.l2(config.regularization_parameter)))
+            lp.add(BatchNormalization())
+            lp.add(Dropout(config.dropout_rate))
+        lp.add(Dense(units=len(set(y_train)), activation="linear", kernel_regularizer=tf.keras.regularizers.l2(config.regularization_parameter)))
+        print("x_train.shape:", x_train.shape)
+        lp.build(input_shape=(None, x_train.shape[1]))
+        print("lp.summary():", lp.summary())
+        lp.compile(optimizer=optimizer,
+              loss=tf.keras.losses.SparseCategoricalCrossentropy(from_logits=True),
+              metrics=['accuracy'])
+        #lp.load_weights('/home/user/Bureau/NormWear/tmp/checkpoint.model_1000.keras')
+
         # print(set(y_train))
     else:
         # lp = LinearRegression()
@@ -89,7 +139,14 @@ def linear_prob(
     # fit linear model
     # start = time.time()
     # print("Fitting Linear Model...")
-    lp = lp.fit(x_train, y_train)
+    model_checkpoint_callback = tf.keras.callbacks.ModelCheckpoint(
+        filepath='./tmp/checkpoint.model_{epoch:02d}.keras',
+        monitor='accuracy',
+        mode='max',
+            save_freq='epoch',)
+    lp.fit(x_train, y_train,epochs=config.epoch,verbose=2, batch_size=config.batch_size, callbacks=[model_checkpoint_callback,WandbMetricsLogger(log_freq="epoch"),
+                     WandbModelCheckpoint("model.keras")],validation_split=config.validation_split)
+    wandb.finish()
     # end = time.time()
     # print("Time consumed:", end-start, "s")
 
@@ -118,7 +175,7 @@ def calculate_score(lp, x_test, y_true, task_type, y_train=None):
         final_scores = [1 - np.mean(np.absolute((y_true - y_pred) / y_true))]
         return final_scores
     else:
-        y_pred = lp.predict_proba(x_test)
+        y_pred = softmax(lp.predict(x_test))
 
         final_scores = list()
 
@@ -134,7 +191,7 @@ def calculate_score(lp, x_test, y_true, task_type, y_train=None):
         # y_pred = one_hot
 
         # remove non-exist class in y_true
-        y_pred = y_pred[:, y_set]
+        #y_pred = y_pred[:, y_set]
         y_pred /= np.sum(y_pred, axis=1, keepdims=True)
 
         # calculate score

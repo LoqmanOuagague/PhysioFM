@@ -64,6 +64,19 @@ def get_args_parser():
     parser.add_argument('--dist_on_itp', action='store_true')
     parser.add_argument('--dist_url', default='env://',
                         help='url used to set up distributed training')
+    parser.add_argument('--decay_rate', type=float, default=0.5,
+                        help='Decay rate for optimizer')
+    parser.add_argument('--dropout_rate', type=float, default=0.3,
+                        help='Dropout rate')
+    parser.add_argument('--initial_learning_rate', type=float, default=0.001,
+                        help='Initial learning rate')
+    parser.add_argument('--metric', type=str, default='accuracy',
+                        #choices=['accuracy', 'f1', 'auc', 'precision', 'recall'],
+                        help='Evaluation metric')
+    parser.add_argument('--number_of_layer', type=int, default=4,
+                        help='Number of layers in the model')
+    parser.add_argument('--regularization_parameter', type=float, default=0.1,
+                        help='Regularization parameter (lambda)')
     
 
     return parser
@@ -82,7 +95,9 @@ def launch_linear_prob(args, embed_root, all_fns):
 
     # get split
     # print("Fetching data split...")
-    split = json.load(open("../data/{}/train_test_split.json".format(args.ds_name)))
+    current_file_dir = os.path.dirname(os.path.abspath(__file__))
+    project_root = os.path.dirname(current_file_dir)
+    split = json.load(open(os.path.join(project_root,"data",args.ds_name,"train_test_split.json")))
 
     # load data
     x_train, y_train, x_test, y_test = list(), dict(), list(), dict()
@@ -134,7 +149,7 @@ def launch_linear_prob(args, embed_root, all_fns):
 
             # TODO if args.group != 0: use old pipeline
 
-            score = linear_prob(
+            score = linear_prob(args,
                 x_train,
                 y_train[type_i],
                 x_test,
@@ -144,11 +159,11 @@ def launch_linear_prob(args, embed_root, all_fns):
             )
 
             # save the score
-            if task_scores.get(CLASS_NUM[args.ds_name]["names"][type_i]) is None:
-                task_scores[CLASS_NUM[args.ds_name]["names"][type_i]] = list()
-            task_scores[CLASS_NUM[args.ds_name]["names"][type_i]].append(score)
+            if task_scores.get(CLASS_NUM["wearable_downstream/"+args.ds_name]["names"][type_i]) is None:
+                task_scores[CLASS_NUM["wearable_downstream/"+args.ds_name]["names"][type_i]] = list()
+            task_scores[CLASS_NUM["wearable_downstream/"+args.ds_name]["names"][type_i]].append(score)
 
-        print("Curr scores:", [round(100*s[0], 3) for s in task_scores[CLASS_NUM[args.ds_name]["names"][type_i]]])
+        print("Curr scores:", [round(100*s[0], 3) for s in task_scores[CLASS_NUM["wearable_downstream/"+args.ds_name]["names"][type_i]]])
     
     # log
     for task in task_scores:
@@ -200,12 +215,11 @@ def launch_linear_prob(args, embed_root, all_fns):
 #     return record["score"]
 
     # save record
-
 if __name__ == '__main__':
     # get command line arguments
     args = get_args_parser()
     args = args.parse_args()
-
+    
     # python -m src.downstream.linear_prob_main --ds_name wearable_downstream/uci_har --model_name normwear --num_runs 100
     
     launch_linear_prob(args)
