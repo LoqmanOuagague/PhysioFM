@@ -184,6 +184,7 @@ class MSiTFAggregation(nn.Module):
 
 # main module
 def mean_pooling(model_output, attention_mask):
+    
     token_embeddings = model_output.hidden_states[-1] #First element of model_output contains all token embeddings
     input_mask_expanded = attention_mask.unsqueeze(-1).expand(token_embeddings.size()).float()
     return torch.sum(token_embeddings * input_mask_expanded, 1) / torch.clamp(input_mask_expanded.sum(1), min=1e-9)
@@ -262,13 +263,15 @@ class NormWearZeroShot(nn.Module):
         loss_l1 = nn.L1Loss()
         # loss_l1 = nn.MSELoss()
         loss_cos = nn.CosineEmbeddingLoss()
-        self.lambda_temp = nn.Parameter(torch.ones(1)*42, requires_grad=True)
+        self.lambda_temp = nn.Parameter(torch.ones(1)*0.07, requires_grad=True)
         def ctr_loss(x, y):
             # x, y: bn, E
-            dot_prod = torch.exp(torch.matmul(x, y.T)) ** (1/self.lambda_temp) # bn, bn
-            loss = F.softmax(dot_prod, dim=1) # bn, bn
-            loss = torch.log(torch.diagonal(loss) / loss.sum(dim=1)) # bn
-            return -loss.mean()
+            # L2 normalization for cosine similarity
+            x = F.normalize(x, p=2, dim=-1)
+            y = F.normalize(y, p=2, dim=-1)
+            logits = torch.matmul(x, y.T) / self.lambda_temp # bn, bn
+            targets = torch.arange(x.size(0), device=x.device)
+            return nn.functional.cross_entropy(logits, targets)
 
         # aggregate loss
         self.loss_f = lambda x, y: torch.sum(torch.nan_to_num(torch.stack([
