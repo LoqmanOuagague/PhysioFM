@@ -15,7 +15,8 @@ if __name__ == '__main__':
 
     save_remark = args.remark if len(args.remark) > 0 else args.model_name
     save_fname = "{}_results_all.pkl".format(save_remark)
-    save_name = "../data/results/downstream_results/{}".format(save_fname) # full path
+    current_file_dir = os.path.dirname(os.path.abspath(__file__))
+    save_name = os.path.join(current_file_dir,"data","results","downstream_results",save_fname) # full path
     pod_name = "physio-model-5d98486f85-ngv5t"
 
     DATA_GROUPS = {
@@ -37,6 +38,7 @@ if __name__ == '__main__':
         ],
         1: [ # if test a subset of the tasks, specified them here, e.g.:
             "wesad",
+            #"uci_har"
         ]
     }
 
@@ -85,7 +87,7 @@ if __name__ == '__main__':
                 all_results = dict()
         
         all_results[dataset] = curr_res
-
+        print(all_results)
         # write new results
         with open(save_name, 'wb') as f:
             pickle.dump(all_results, f)
