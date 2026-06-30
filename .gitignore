@@ -5,3 +5,6 @@ model/*
 job_script.sh
 NormWear/weights/*
 NormWear/data/*
+wandb
+model.keras
+tmp
