@@ -35,18 +35,18 @@ def linear_prob(args,
         "data":"WESAD",
         "epoch": args.epochs,
         "batch_size": args.batch_size,
-        "regularization_parameter": args.regularization_parameter,
+        "regularization_parameter": 10**(args.regularization_parameter),
         "learning_rate_schedule": "ExponentialDecay",
-        "initial_learning_rate": args.initial_learning_rate,
+        "initial_learning_rate": 10**(-args.initial_learning_rate),
         "decay_steps": 1,
-        "decay_rate": args.decay_rate,
+        "decay_rate": 10**(args.decay_rate),
         "staircase":False,
         "validation_split":0.2,
         #"seed":23,
         "dropout_rate": args.dropout_rate
     }
     )   
-    config = wandb.config
+    config =wandb.config
     # init linear model
     lr_schedule = tf.keras.optimizers.schedules.ExponentialDecay(
         initial_learning_rate=config.initial_learning_rate,
@@ -67,7 +67,7 @@ def linear_prob(args,
             # class_weight='balanced'
         )
         lp = Sequential()
-       
+        print(config.regularization_parameter)
         for i in range(0, config.number_of_layer - 2):
             lp.add(Dense(units=2**(config.number_of_layer-i), activation="relu", kernel_regularizer=tf.keras.regularizers.l2(config.regularization_parameter)))
             lp.add(BatchNormalization())
