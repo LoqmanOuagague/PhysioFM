@@ -96,6 +96,11 @@ class MSiTFAggregation(nn.Module):
         super().__init__()
         self.fuse_method = fuse_method # mean, last, msitf
 
+        # CLIP-style log-space contrastive temperature, kept on the aggregator
+        # (rather than the outer model) so it round-trips through the
+        # aggregator-only checkpoint save/load used during resume.
+        self.log_logit_scale = nn.Parameter(torch.log(torch.tensor(1 / 0.07)), requires_grad=True)
+
         if fuse_method == 'msitf':
             # self.v = nn.Linear(num_neurons, query_size)
 
@@ -263,13 +268,16 @@ class NormWearZeroShot(nn.Module):
         loss_l1 = nn.L1Loss()
         # loss_l1 = nn.MSELoss()
         loss_cos = nn.CosineEmbeddingLoss()
-        self.lambda_temp = nn.Parameter(torch.ones(1)*0.07, requires_grad=True)
+        # Bounded log-space temperature lives on self.aggregator (see
+        # MSiTFAggregation) so it's saved/restored together with the
+        # aggregator's other parameters during the aggregator-only checkpoint.
         def ctr_loss(x, y):
             # x, y: bn, E
             # L2 normalization for cosine similarity
             x = F.normalize(x, p=2, dim=-1)
             y = F.normalize(y, p=2, dim=-1)
-            logits = torch.matmul(x, y.T) / self.lambda_temp # bn, bn
+            logit_scale = self.aggregator.log_logit_scale.exp().clamp(max=100)
+            logits = torch.matmul(x, y.T) * logit_scale # bn, bn
             targets = torch.arange(x.size(0), device=x.device)
             return nn.functional.cross_entropy(logits, targets)
 
