@@ -1,5 +1,23 @@
+# Model backbones supported across the downstream/zero-shot pipelines.
 MODEL_LIST = ['ast', 'clap', 'opera', 'normwear', 'chronos']
 
+# Per-dataset task specification, keyed by "<domain>/<dataset_name>" matching the
+# folder under NormWear/data/. Each dataset can bundle multiple sub-tasks
+# (e.g. multiple labels predicted from the same embedding), so every value below
+# is a list indexed by task position (task_idx), aligned with the dataset's
+# label order.
+#
+# Keys per entry:
+#   "nums":   for a classification task ('class'), the number of classes;
+#             for a regression task ('reg'), the output dimensionality
+#             (1 for scalar regression, >1 for multi-output regression).
+#   "names":  display/log name for each task, used to key the results dict
+#             (task_scores) and to label task outputs in zero-shot inference.
+#   "ranges": optional, regression tasks only. [low, high] bounds of the target
+#             value, used to build a SigmoidRange output head (NormWear/modules/head.py)
+#             that squashes predictions into that range. `None` at a given
+#             position means no bounding for that task. Omitted entirely for
+#             datasets with no regression tasks.
 CLASS_NUM = {
     "audio_downstream/KAUH": {
         "nums": [8],
@@ -102,6 +120,11 @@ CLASS_NUM = {
     "wearable_downstream/wesad": {
         "nums": [3],
         "names": ["wesad"]
+    },
+    "wearable_downstream/Cogload": {
+        "nums": [6],
+        "ranges": [[1, 100] for _ in range(6)],
+        "names": ["Cogload"]
     },
     "wearable_downstream/Epilepsy": {
         "nums": [2 for _ in range(5)],
