@@ -23,7 +23,10 @@ def linear_prob(args,
     y_test,
     task_type='class',
     random_state=42
-): 
+):
+    tf.keras.utils.set_random_seed(random_state)
+    steps_per_epoch = max(1, len(x_train) // args.batch_size)
+
     wandb.init(
     # set the wandb project where this run will be logged
     project="NormWear full shot",
@@ -35,24 +38,45 @@ def linear_prob(args,
         "data":"WESAD",
         "epoch": args.epochs,
         "batch_size": args.batch_size,
-        "regularization_parameter": 10**(args.regularization_parameter),
-        "learning_rate_schedule": "ExponentialDecay",
-        "initial_learning_rate": 10**(-args.initial_learning_rate),
-        "decay_steps": 1,
-        "decay_rate": 10**(args.decay_rate),
+        "regularization_parameter": args.regularization_parameter,
+        "learning_rate_schedule": args.lr_scheduler,
+        "initial_learning_rate": args.initial_learning_rate,
+        "decay_steps": steps_per_epoch,
+        "decay_rate": args.decay_rate,
         "staircase":False,
         "validation_split":0.2,
+        "patience": args.patience,
         #"seed":23,
         "dropout_rate": args.dropout_rate
     }
-    )   
+    )
     config =wandb.config
-    # init linear model
-    lr_schedule = tf.keras.optimizers.schedules.ExponentialDecay(
-        initial_learning_rate=config.initial_learning_rate,
-        decay_steps=config.decay_steps,
-        decay_rate=config.decay_rate,staircase=config.staircase)
-    optimizer = tf.keras.optimizers.Adam(lr_schedule)
+
+    # init learning rate schedule / optimizer. Some schedulers (plateau) can't be
+    # baked into a tf.keras LR schedule object since they react to validation
+    # metrics at runtime, so they're implemented as a callback instead.
+    scheduler_callbacks = []
+    if config.learning_rate_schedule == 'exponential':
+        lr_schedule = tf.keras.optimizers.schedules.ExponentialDecay(
+            initial_learning_rate=config.initial_learning_rate,
+            decay_steps=config.decay_steps,
+            decay_rate=config.decay_rate, staircase=config.staircase)
+        optimizer = tf.keras.optimizers.Adam(lr_schedule)
+    elif config.learning_rate_schedule == 'cosine':
+        lr_schedule = tf.keras.optimizers.schedules.CosineDecay(
+            initial_learning_rate=config.initial_learning_rate,
+            decay_steps=config.epoch * steps_per_epoch)
+        optimizer = tf.keras.optimizers.Adam(lr_schedule)
+    elif config.learning_rate_schedule == 'plateau':
+        optimizer = tf.keras.optimizers.Adam(config.initial_learning_rate)
+        scheduler_callbacks.append(tf.keras.callbacks.ReduceLROnPlateau(
+            monitor='val_loss', factor=config.decay_rate,
+            patience=max(1, config.patience // 2), min_lr=1e-7))
+    elif config.learning_rate_schedule == 'constant':
+        optimizer = tf.keras.optimizers.Adam(config.initial_learning_rate)
+    else:
+        raise ValueError("Unknown lr_scheduler: {}".format(config.learning_rate_schedule))
+
     if task_type == 'class':
         lp = LogisticRegression(
             max_iter=500,
@@ -73,7 +97,6 @@ def linear_prob(args,
             lp.add(BatchNormalization())
             lp.add(Dropout(config.dropout_rate))
         lp.add(Dense(units=len(set(y_train)), activation="linear", kernel_regularizer=tf.keras.regularizers.l2(config.regularization_parameter)))
-        print("x_train.shape:", x_train.shape)
         lp.build(input_shape=(None, x_train.shape[1]))
         print("lp.summary():", lp.summary())
         lp.compile(optimizer=optimizer,
@@ -84,12 +107,11 @@ def linear_prob(args,
         # print(set(y_train))
     else:
         # lp = LinearRegression()
-        lp = Ridge(
-            max_iter=500,
-            solver="cholesky",
-            alpha=1e0
-            # alpha=1e1
-        )
+        #lp = Ridge(
+        #    max_iter=500,
+        #    solver="cholesky",
+        #    alpha=1e0
+        # alpha=1e1)
         # lp = SGDRegressor(
         #     max_iter=1000,
         #     # penalty='elasticnet',
@@ -100,9 +122,18 @@ def linear_prob(args,
         #     # epsilon=1e-6
         # )
         # lp = Lasso()
-        if len(y_test.shape) > 1 and y_test.shape[1] > 1:
-            lp = MultiOutputRegressor(lp)
-        
+        output_dim = y_test.shape[1] if len(y_test.shape) > 1 and y_test.shape[1] > 1 else 1
+        lp = Sequential([
+            Dropout(config.dropout_rate),
+            BatchNormalization(),
+            Dense(units=output_dim, activation="linear", kernel_regularizer=tf.keras.regularizers.l2(config.regularization_parameter)),
+        ])
+
+        lp.build(input_shape=(None, x_train.shape[1]))
+        print("lp.summary():", lp.summary())
+        lp.compile(optimizer=optimizer,
+              loss=tf.keras.losses.MeanSquaredError(),
+              metrics=[tf.keras.metrics.MeanAbsoluteError(name='mae')])
         # # z normalize
         # y_mean, y_std = np.mean(y_train, axis=0), np.std(y_train, axis=0)
         # y_train = (y_train - y_mean) / y_std
@@ -141,14 +172,19 @@ def linear_prob(args,
     # print("Fitting Linear Model...")
     model_checkpoint_callback = tf.keras.callbacks.ModelCheckpoint(
         filepath='./tmp/checkpoint.model_{epoch:02d}.keras',
-        monitor='accuracy',
-        mode='max',
+        monitor='mae' if task_type != 'class' else 'accuracy',
+        mode='min' if task_type != 'class' else 'max',
             save_freq='epoch',)
-    lp.fit(x_train, y_train,epochs=config.epoch,verbose=2, batch_size=config.batch_size, callbacks=[model_checkpoint_callback,WandbMetricsLogger(log_freq="epoch"),
-                     WandbModelCheckpoint("model.keras")],validation_split=config.validation_split)
+    history = lp.fit(x_train, y_train,epochs=config.epoch,verbose=2, batch_size=config.batch_size, callbacks=[model_checkpoint_callback,WandbMetricsLogger(log_freq="epoch"),WandbModelCheckpoint("model.keras")]+scheduler_callbacks,validation_split=config.validation_split)
     wandb.finish()
     # end = time.time()
     # print("Time consumed:", end-start, "s")
+
+    if task_type != 'class':
+        best_epoch = int(np.argmin(history.history['val_loss']))
+        print("BEST_VAL_MAE: {:.6f} (train_mae: {:.6f}, best_epoch: {}/{})".format(
+            history.history['val_mae'][best_epoch], history.history['mae'][best_epoch],
+            best_epoch + 1, len(history.history['loss'])))
 
     # test time
     return calculate_score(lp, x_test, y_test, task_type, y_train=y_train)
