@@ -62,8 +62,10 @@ def basic_preproc(
     ts_clear = gaussian_filter(ts_clear, sigma=tr*smooth_c)
 
     # normalize (optional)
-    ts_clear /= np.mean(np.abs(ts_clear))
-    
+    norm = np.mean(np.abs(ts_clear))
+    if norm > 0:
+        ts_clear /= norm
+
     return ts_clear
 
 def preproc_all(all_tss, ss, ts=65, lc=0.1, hc=128, outlier_p=0.95): 
