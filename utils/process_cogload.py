@@ -1,30 +1,30 @@
 """
-Convert the CogLoad1 train dataset into one pickle file per (participant, task, level, window).
+Convert the CogLoad1 train dataset into a manifest.csv + .npy signal dataset,
+in the format expected by physioMoE.data.dataset.PhysioTLXDataset.
 
 For every participant CSV in train/raw/ (e.g. `iz2ps_sensors.csv`) and every
 task/level segment reported for that participant in personality_performance.csv,
 this script resamples the segment to TARGET_SAMPLING_RATE and splits it into
 non-overlapping WINDOW_SECONDS windows (a trailing partial window is dropped).
-Each window builds a dictionary:
 
-    {
-        "uid": str,
-        "task": str,
-        "level": int,
-        "window": int,        # index of the window within the (uid, task, level) segment.
-        "data": np.ndarray,   # shape (n_signals, n_samples), stacked physiological signals.
-        "labels": dict,       # the six NASA-TLX dimensions for this segment.
-        "context": dict,      # the 32 personality traits for this participant, gender, and age of the participant.
-    }
+Each window is saved as a float64 array of shape (n_signals, n_samples) to
+    {out_dir}/signals/{uid}_{task}_{level}_{window}.npy
+and gets one row in the manifest with columns:
 
-and stores it as train/processed/{uid}_{task}_{level}_{window}.pkl
+    sample_id, task_text, signal_path,
+    mental_demand, physical_demand, temporal_demand, performance, effort, frustration,
+    uid, task, level, window, <personality/demographic columns>
+
+Segments (not individual windows) are randomly assigned to train/test so that
+windows from the same segment never leak across the split. Each split is
+written to its own manifest CSV:
+    {out_dir}/train_manifest.csv
+    {out_dir}/test_manifest.csv
 """
 
 import glob
 import os
-import pickle
 import sys
-import json
 from tqdm import tqdm
 import numpy as np
 import pandas as pd
@@ -66,14 +66,17 @@ PERSONALITY_COLUMNS = ['sincerity', 'fairness','age','sex_male',
        'aesthetic_appreciation', 'inquisitiveness', 'creativity',
        'unconventionality', 'honesty', 'emotionality', 'extraversion',
        'agreeableness', 'conscientiousness', 'openness','education']
-train_test_split = {"train": [], "test": []}
+
+manifest_rows = {"train": [], "test": []}
+
+
 def fill_missing(segment: pd.DataFrame) -> pd.DataFrame:
     # replace a missing value with the following value, or the previous one if there is no following value
     return segment.bfill().ffill()
 
 
 def process_participant(sensors_path: str, performance: pd.DataFrame, out_dir: str, train_split: float) -> int:
-    global train_test_split
+    global manifest_rows
     uid = os.path.basename(sensors_path).split("_")[0]
     df = pd.read_csv(sensors_path)
 
@@ -102,39 +105,39 @@ def process_participant(sensors_path: str, performance: pd.DataFrame, out_dir: s
             continue
 
         labels_explicit = {short: row[col] for col, short in TLX_DIMENSIONS.items()}
-        labels = [labels_explicit[short] for short in TLX_DIMENSIONS.values()]
         context = {col: row[col] for col in PERSONALITY_COLUMNS}
+        task_text = f"Cognitive workload task '{task}' at difficulty level {level}"
+
+        # randomly assign the whole segment to train or test, so that windows
+        # from the same segment never leak across the split
+        split = "train" if binomialvariate(1, train_split) == 1 else "test"
+
         for w in range(n_windows):
-            # randomly assign this window to train or test split 
-            is_in_train = binomialvariate(1, train_split) == 1
-            if is_in_train:
-                train_test_split["train"].append(f"{uid}_{task}_{level}_{w}.pkl")
-            else:
-                train_test_split["test"].append(f"{uid}_{task}_{level}_{w}.pkl")
-            
+            sample_id = f"{uid}_{task}_{level}_{w}"
             window_data = data[:, w * WINDOW_SIZE: (w + 1) * WINDOW_SIZE]
-            record = {
+
+            signal_path = os.path.join("signals", f"{sample_id}.npy")
+            np.save(os.path.join(out_dir, signal_path), window_data)
+
+            manifest_row = {
+                "sample_id": sample_id,
+                "task_text": task_text,
+                "signal_path": signal_path,
+                **labels_explicit,
                 "uid": uid,
                 "task": task,
                 "level": level,
                 "window": w,
-                "data": window_data,
-                "sampling_rate": TARGET_SAMPLING_RATE,
-                "labels_explicit": labels_explicit,
-                "label":[{"reg":labels}],
-                "context": context,
+                **context,
             }
-
-            out_path = os.path.join(out_dir, "sample_for_downstream", f"{uid}_{task}_{level}_{w}.pkl")
-            with open(out_path, "wb") as f:
-                pickle.dump(record, f)
+            manifest_rows[split].append(manifest_row)
             n_written += 1
 
     return n_written
 
 
 def main(raw_dir: str, out_dir: str, performance_csv: str, train_split: float):
-    os.makedirs(os.path.join(out_dir, "sample_for_downstream"), exist_ok=True)
+    os.makedirs(os.path.join(out_dir, "signals"), exist_ok=True)
     performance = pd.read_csv(performance_csv)
 
     sensor_files = sorted(
@@ -144,16 +147,20 @@ def main(raw_dir: str, out_dir: str, performance_csv: str, train_split: float):
     print(f"Found {len(sensor_files)} participant sensor files in {raw_dir}")
     total = 0
     for path in tqdm(sensor_files, desc="Processing participants"):
-        total += process_participant(path, performance,out_dir, train_split)
-    with open(os.path.join(out_dir, "train_test_split.json"), "w") as f:
-        json.dump(train_test_split, f, indent=2)
-    print(f"Done. Wrote {total} pickle files to {out_dir}")
+        total += process_participant(path, performance, out_dir, train_split)
+
+    for split, rows in manifest_rows.items():
+        manifest_path = os.path.join(out_dir, f"{split}_manifest.csv")
+        pd.DataFrame(rows).to_csv(manifest_path, index=False)
+        print(f"Wrote {len(rows)} rows to {manifest_path}")
+
+    print(f"Done. Wrote {total} .npy files to {os.path.join(out_dir, 'signals')}")
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Convert the CogLoad1 train dataset into one pickle file per (participant, task, level).")
+    parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--raw_dir', type=str, help='Directory containing raw sensor CSV files.')
-    parser.add_argument('--out_dir', type=str, help='Directory to save processed pickle files.')
+    parser.add_argument('--out_dir', type=str, help='Directory to save the manifest CSVs and .npy signal files.')
     parser.add_argument('--performance_csv', type=str, help='CSV file containing personality and performance data.')
     parser.add_argument('--train_split', type=float, default=0.8, help='Proportion (between 0 and 1) of data (more specifically segments) to include in training set.')
     args = parser.parse_args()
