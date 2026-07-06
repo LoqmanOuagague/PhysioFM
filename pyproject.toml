@@ -7,6 +7,7 @@ dependencies = [
     "joblib>=1.5.3",
     "multiprocess>=0.70.19",
     "pandas>=3.0.3",
+    "pytest>=9.1.1",
     "python-dotenv>=1.2.2",
     "pytorch-pretrained-vit>=0.0.7",
     "pywavelets>=1.9.0",
@@ -19,3 +20,14 @@ dependencies = [
     "transformers>=5.9.0",
     "wandb>=0.28.0",
 ]
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+]
+
+[project.scripts]
+physiomoe-train = "physiomoe.train:main"
+physiomoe-evaluate = "physiomoe.evaluate:main"
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
