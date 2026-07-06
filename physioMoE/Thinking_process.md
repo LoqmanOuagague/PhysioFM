@@ -18,6 +18,7 @@ try different architectures
 - try different Text encoders
 - try fine-tune (fully or partially) a model to encode the task this may lead the attention mechanism to focus on terms that are relevant to the cognitive workload
 - try an encoder that is from an LLM that plays in different enviroment
+- try different fusion methods for the embedding.
 #### Text of the context
 The main question here is how will the prompt to the text encoder be because the prompt can influence massively the encoding, here are a few way of prompting to try
 - unified standard text for all the datasets 
