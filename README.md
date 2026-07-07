@@ -30,15 +30,26 @@ NormWear/                      # Core model, forked from the original repo
 ├── downstream_main.py          # Fullshot evaluation entry point (embeddings + linear/shallow probe)
 ├── downstream_pipeline/        # Task specs, embedding extraction, probing, finetuning
 ├── baseline_models/            # Baselines used for comparison (CrossViT, TFC, ...)
-├── data/                       # Downstream & pretraining datasets (gitignored, see below)
 ├── weights/                    # Model checkpoints (gitignored, see below)
 └── README.md                   # Original upstream documentation
 
-utils/
-└── process_cogload.py          # My preprocessing script: raw CogLoad1 CSVs → NormWear-ready windows
+data/                           # Downstream & pretraining datasets (gitignored, see below)
 
-physioMoE/
-└── Thinking_process.md         # Design notes for a Mixture-of-Experts extension (see Roadmap)
+utils/
+├── process_cogload.py          # My preprocessing script: raw CogLoad1 CSVs → NormWear-ready windows
+└── process_wesad.py            # My preprocessing script: raw WESAD .pkl files → NormWear-ready windows
+
+physioMoE/                      # Text-conditioned Mixture-of-Experts for NASA-TLX prediction (see below)
+├── models/                     # Router, experts, text/NormWear encoders, PhysioMoE wiring
+├── data/                       # PhysioTLXDataset (manifest CSV + .npy signals) used by train.py/evaluate.py
+├── train.py / evaluate.py      # CLI training & checkpoint evaluation
+├── tests/                      # Network-free unit tests (router gating, expert combination, forward/backward)
+└── Design_notes.md             # Design rationale and open questions
+
+CogLoad1 fullshot evaluation/  # Autonomous-agent ("autoresearch") LoRA fine-tuning of NormWear on CogLoad1
+├── train.py                    # LoRA-adapted NormWear backbone + NASA-TLX head (the file the agent edits)
+├── prepare.py                  # Fixed CWT spectrogram caching + held-out test evaluation (not modified)
+└── program.md                  # Agent instructions for the autonomous experiment loop
 
 docs/
 ├── Running_zeroshot_evaluation_of_NormWear.md   # Detailed zero-shot / HPC walkthrough
@@ -53,7 +64,7 @@ sweep.yaml                      # Weights & Biases hyperparameter sweep config
 
 ## Installation
 
-### Using uv
+### Using uv (Recommended)
 
 ```sh
 # Creating the virtual environment
@@ -95,7 +106,7 @@ hf download mosaic-laboratory/normwear --local-dir YOUR_DIRECTORY
 
 ### Downstream datasets (WESAD, UCI-HAR, ...)
 
-The processed downstream datasets from the original paper can be downloaded from [Google Drive](https://drive.google.com/file/d/1Mojf_iby8FnUydogwUE-b321fB1V6SGK/view?usp=sharing). After extraction, place the dataset folders under `NormWear/data/`.
+The processed downstream datasets from the original paper can be downloaded from [Google Drive](https://drive.google.com/file/d/1Mojf_iby8FnUydogwUE-b321fB1V6SGK/view?usp=sharing).
 
 ### Pretraining dataset
 
@@ -107,18 +118,35 @@ CogLoad1 is not part of the original NormWear release; it needs to be preprocess
 
 1. Resamples each segment from ~1 Hz to **65 Hz** (NormWear's pretraining sampling rate);
 2. Splits it into non-overlapping **6-second windows** (matching NormWear's pretraining segment length), dropping a trailing partial window;
-3. Randomly assigns each window to train/test (default 80/20 split, done at the window level);
-4. Writes one pickle file per window in the format NormWear's downstream pipeline expects, with the six NASA-TLX scores stored as a single multi-output regression label.
+3. Randomly assigns each segment (not individual windows, so no leakage across the split) to train/test, default 80/20;
+4. Writes one `.npy` file per window plus a manifest CSV (`sample_id`, `task_text`, `signal_path`, the six NASA-TLX scores, and personality/demographic columns), in the format `physioMoE.data.dataset.PhysioTLXDataset` expects.
 
 ```sh
 python3 utils/process_cogload.py \
     --raw_dir path/to/train/raw \
-    --out_dir NormWear/data/Cogload \
+    --out_dir data/Cogload \
     --performance_csv path/to/personality_performance.csv \
     --train_split 0.8
 ```
 
-This currently yields ~3,900 windows across all participants/tasks/levels (roughly 3,100 train / 800 test).
+This currently yields ~3,900 windows across all participants/tasks/levels (roughly 3,100 train / 800 test). Pass `--split_mode subject_independent` to isolate one random participant as the entire test set (leave-one-subject-out) instead of the default per-segment random split.
+
+### WESAD (from raw)
+
+As an alternative to the pre-processed Google Drive download above, WESAD can also be built directly from the raw per-subject release (`SX.pkl`, `SX_readme.txt`, `SX_quest.csv`, ... per subject; place it under `data/WESAD_RAW/`) with [`utils/process_wesad.py`](utils/process_wesad.py). Starting from the synchronised chest (RespiBAN, 700 Hz) and wrist (Empatica E4) signals in each subject's `SX.pkl`, the script:
+
+1. Locates the contiguous baseline/stress/amusement segments from the per-sample study-protocol label (meditation and the transient/undefined labels are dropped, matching the standard WESAD 3-class stress-detection setup);
+2. Resamples the chest channels (700 Hz) and the wrist EDA/TEMP channels (4 Hz) independently to **65 Hz** and stacks them into 10 channels (chest ACC x/y/z, ECG, EMG, EDA, Temp, Resp + wrist EDA, TEMP);
+3. Splits each segment into non-overlapping **6-second windows** (matching NormWear's pretraining segment length), dropping a trailing partial window;
+4. Randomly assigns each segment to train/test and writes one `.npy` file per window plus a manifest CSV — the same `subject_dependent` / `subject_independent` (leave-one-subject-out) split modes as `process_cogload.py`.
+
+**Note**: this second alternative is provided because in the preprocessed dataset provided by the authors segments **are not** assigned to the participant. Thus, it is impossible to evaluate the model by leaving one subject out. Moreover, it does not allow the calculation of the true accuracy because it evaluate accuracy on windows where as the real senario is to evaluate on the whole recorded signal.
+```sh
+python3 utils/process_wesad.py \
+    --raw_dir data/WESAD_RAW \
+    --out_dir data/WESAD \
+    --train_split 0.8
+```
 
 ## Environment variables (`.env`)
 
@@ -139,9 +167,13 @@ CUDA_VISIBLE_DEVICES=0 python3 -m NormWear.zero_shot.zero_shot_inference_paralle
 
 `zero_shot_inference.py` uses GitHub-released weights, `zero_shot_inference_HF.py` uses the HuggingFace weights, and `_parallel` runs faster and is the recommended entry point on HPC.
 
+## Fullshot LoRA fine-tuning on CogLoad1 (autoresearch)
+
+[`CogLoad1 fullshot evaluation/`](CogLoad1%20fullshot%20evaluation/) fine-tunes the NormWear backbone with LoRA adapters plus a small NASA-TLX regression head directly on CogLoad1's raw signals (as opposed to the frozen-embedding + linear-probe path used by `NormWear/downstream_main.py`). It follows the ["autoresearch"](https://github.com/karpathy/nanochat) methodology (adapted from Karpathy's nanochat repo): a coding agent is pointed at [`program.md`](CogLoad1%20fullshot%20evaluation/program.md) and left to iterate on `train.py` autonomously — each run trains for a fixed 10-minute wall-clock budget, is evaluated on the held-out test split via `prepare.py`'s frozen `evaluate()`, and is kept or discarded based on `overall_mae`, with every attempt logged to an untracked `results.tsv`. `prepare.py` (CWT spectrogram caching + the ground-truth evaluation) is off-limits to the agent; only `train.py` (LoRA rank/targets, head architecture, optimizer, hyperparameters, ...) is fair game. See that folder's [`README.md`](CogLoad1%20fullshot%20evaluation/README.md) for the full methodology and `program.md` for the exact experiment loop.
+
 ## Roadmap: physioMoE
 
-The next phase, sketched out in [`physioMoE/Thinking_process.md`](physioMoE/Thinking_process.md), is a **Mixture-of-Experts** extension inspired by [Mixtral](https://arxiv.org/abs/2401.04088): route physiological embeddings through multiple expert sub-networks (each specializing in patterns from different datasets/tasks), conditioned by a text encoding of the task and its context, to improve cognitive workload estimation while keeping the number of active parameters small. Open questions being tracked there include:
+[`physioMoE/`](physioMoE/) is a **Mixture-of-Experts** extension inspired by [Mixtral](https://arxiv.org/abs/2401.04088) that already has an initial implementation (router, expert bank, text/NormWear encoders, training/evaluation CLIs, unit tests — see [`physioMoE/README.md`](physioMoE/README.md)): it routes physiological embeddings through multiple expert sub-networks (each specializing in patterns from different datasets/tasks), conditioned by a text encoding of the task and its context, to predict NASA-TLX workload scores while keeping the number of active parameters small. Open design questions still being iterated on, tracked in [`physioMoE/Design_notes.md`](physioMoE/Design_notes.md), include:
 
 - **Resampling robustness** — making the model less dependent on a fixed 65 Hz input rate.
 - **Fusion mechanism** for combining per-channel signal embeddings (averaging, CNN, CLS-token fusion).
