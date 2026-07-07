@@ -4,7 +4,7 @@
 model/*
 job_script.sh
 NormWear/weights/*
-NormWear/data/*
+data/*
 wandb
 model.keras
 tmp
