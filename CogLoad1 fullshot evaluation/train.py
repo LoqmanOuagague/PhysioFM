@@ -8,9 +8,15 @@ precomputed once per split and cached to disk, since they only depend on the
 raw signal and don't change across epochs -- only the transformer forward
 pass (backbone + LoRA + head) is repeated every epoch.
 
+Trains for a fixed wall-clock time budget (default 10 minutes, excluding dataset
+caching/model construction) rather than a fixed epoch count, so experiments stay
+comparable across changes regardless of per-epoch cost. At the end, evaluates the
+best checkpoint on the held-out test split via prepare.py's evaluate() and prints
+a summary block with the ground-truth metric (overall_mae).
+
 Usage:
     python train.py
-    python train.py --epochs 30 --lora-r 8 --lora-targets qkv proj
+    python train.py --time-budget-minutes 10 --lora-r 8 --lora-targets qkv proj
 """
 
 from __future__ import annotations
@@ -31,10 +37,11 @@ sys.path.insert(0, REPO_ROOT)
 from physioMoE.config import NASA_TLX_DIMENSIONS
 from NormWear.modules.normwear import NormWear
 
-# prepare.py owns the CWT spectrogram dataset/cache (it's the "data prep" side of the
-# pipeline, independent of the model). Imported here, not the other way around, so
-# prepare.py's own evaluate() can import this module's model class without a cycle.
-from prepare import SpecDataset
+# prepare.py owns the CWT spectrogram dataset/cache and the held-out test-set evaluation
+# (the "data prep" + "ground truth metric" side of the pipeline, independent of the model).
+# Imported here, not the other way around, so prepare.py's own evaluate() can import this
+# module's model class without a cycle.
+from prepare import SpecDataset, evaluate as evaluate_test, DEFAULT_TEST_MANIFEST
 
 THIS_DIR = os.path.dirname(os.path.abspath(__file__))
 COGLOAD_DIR = os.path.join(REPO_ROOT, "NormWear", "data", "Cogload")
@@ -158,6 +165,7 @@ def trainable_state_dict(model: nn.Module) -> dict[str, torch.Tensor]:
 
 
 def train(args: argparse.Namespace) -> str:
+    script_start = time.time()
     torch.manual_seed(args.seed)
     device = torch.device(args.device if torch.cuda.is_available() else "cpu")
 
@@ -196,8 +204,20 @@ def train(args: argparse.Namespace) -> str:
 
     os.makedirs(os.path.dirname(args.checkpoint), exist_ok=True)
     best_val_loss = float("inf")
+    num_steps = 0
 
-    for epoch in range(1, args.epochs + 1):
+    if device.type == "cuda":
+        torch.cuda.reset_peak_memory_stats(device)
+
+    # Wall-clock training budget (excludes dataset loading/caching and model construction
+    # above), so the AutoResearch loop can compare experiments fairly regardless of how
+    # long any one epoch takes on this platform.
+    time_budget_seconds = args.time_budget_minutes * 60
+    train_loop_start = time.time()
+
+    epoch = 0
+    while True:
+        epoch += 1
         epoch_start = time.time()
         model.train()
         running_loss = 0.0
@@ -211,6 +231,7 @@ def train(args: argparse.Namespace) -> str:
             nn.utils.clip_grad_norm_(trainable, args.grad_clip)
             optimizer.step()
             running_loss += loss.item() * len(specs)
+            num_steps += 1
         train_loss = running_loss / len(train_set)
 
         model.eval()
@@ -225,7 +246,8 @@ def train(args: argparse.Namespace) -> str:
 
         lr = optimizer.param_groups[0]["lr"]
         epoch_time = time.time() - epoch_start
-        print(f"[epoch {epoch}/{args.epochs}] train_loss={train_loss:.4f} val_loss={val_loss:.4f} lr={lr:.2e} ({epoch_time:.1f}s)")
+        training_seconds = time.time() - train_loop_start
+        print(f"[epoch {epoch}] train_loss={train_loss:.4f} val_loss={val_loss:.4f} lr={lr:.2e} ({epoch_time:.1f}s, {training_seconds:.0f}s elapsed)")
 
         if val_loss < best_val_loss:
             best_val_loss = val_loss
@@ -246,13 +268,37 @@ def train(args: argparse.Namespace) -> str:
                 args.checkpoint,
             )
 
+        if training_seconds >= time_budget_seconds or epoch >= args.max_epochs:
+            break
+
     print(f"Best val loss: {best_val_loss:.4f} -> {args.checkpoint}")
+
+    # Ground-truth metric: evaluate the best checkpoint on the held-out test split via
+    # prepare.py's evaluate() (the fixed, agent-cannot-touch evaluation harness).
+    test_metrics = evaluate_test(manifest=args.test_manifest, checkpoint=args.checkpoint, device=args.device)
+
+    total_seconds = time.time() - script_start
+    peak_vram_mb = torch.cuda.max_memory_allocated(device) / (1024 ** 2) if device.type == "cuda" else 0.0
+
+    print("---")
+    print(f"overall_mae:        {test_metrics['overall_mae']:.6f}")
+    print(f"overall_rmse:       {test_metrics['overall_rmse']:.6f}")
+    print(f"training_seconds:   {training_seconds:.1f}")
+    print(f"total_seconds:      {total_seconds:.1f}")
+    print(f"peak_vram_mb:       {peak_vram_mb:.1f}")
+    print(f"num_steps:          {num_steps}")
+    print(f"num_epochs:         {epoch}")
+    print(f"trainable_params_M: {n_trainable / 1e6:.2f}")
+    print(f"total_params_M:     {n_total / 1e6:.1f}")
+    print(f"lora_r:             {args.lora_r}")
+
     return args.checkpoint
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--manifest", default=DEFAULT_TRAIN_MANIFEST, help="train_manifest.csv to load raw signals from.")
+    parser.add_argument("--test-manifest", default=DEFAULT_TEST_MANIFEST, help="test_manifest.csv used for the final ground-truth evaluation.")
     parser.add_argument("--backbone-checkpoint", default=DEFAULT_BACKBONE_CHECKPOINT, help="Pretrained NormWear backbone weights.")
     parser.add_argument("--checkpoint", default=DEFAULT_CHECKPOINT, help="Where to save the best checkpoint.")
     parser.add_argument("--rebuild-cache", action="store_true", help="Recompute CWT spectrograms instead of using the cache.")
@@ -272,7 +318,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--lr-decay-factor", type=float, default=0.5, help="Factor ReduceLROnPlateau multiplies lr by on plateau.")
     parser.add_argument("--lr-patience", type=int, default=5, help="Epochs of no val-loss improvement before the scheduler decays lr.")
     parser.add_argument("--grad-clip", type=float, default=1.0, help="Max gradient norm (gradient clipping).")
-    parser.add_argument("--epochs", type=int, default=30)
+    parser.add_argument("--time-budget-minutes", type=float, default=10.0, help="Fixed wall-clock training budget (excludes dataset caching/model construction).")
+    parser.add_argument("--max-epochs", type=int, default=100_000, help="Safety cap on epochs, in case the time budget is never reached.")
     parser.add_argument("--batch-size", type=int, default=16)
     parser.add_argument("--val-split", type=float, default=0.15, help="Fraction of the train split held out for validation.")
     parser.add_argument("--seed", type=int, default=42)

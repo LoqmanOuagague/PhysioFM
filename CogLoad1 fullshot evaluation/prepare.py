@@ -80,15 +80,22 @@ class SpecDataset(Dataset):
 
 
 @torch.no_grad()
-def evaluate(args: argparse.Namespace) -> dict[str, float]:
+def evaluate(
+    manifest: str = DEFAULT_TEST_MANIFEST,
+    checkpoint: str = DEFAULT_CHECKPOINT,
+    rebuild_cache: bool = False,
+    device: str = "cuda",
+) -> dict[str, float]:
+    """Ground-truth metric for the AutoResearch loop. Plain kwargs (not an argparse.Namespace)
+    so train.py can call this directly at the end of a run without faking a Namespace."""
     # Deferred import: train.py imports SpecDataset from this module, so importing
     # train.py's model class at module level here would create a circular import.
     from train import LoRANormWearTLX
 
-    device = torch.device(args.device if torch.cuda.is_available() else "cpu")
-    ckpt = torch.load(args.checkpoint, map_location=device, weights_only=False)
+    device = torch.device(device if torch.cuda.is_available() else "cpu")
+    ckpt = torch.load(checkpoint, map_location=device, weights_only=False)
 
-    test_set = SpecDataset(args.manifest, COGLOAD_DIR, cache_name="test", rebuild_cache=args.rebuild_cache)
+    test_set = SpecDataset(manifest, COGLOAD_DIR, cache_name="test", rebuild_cache=rebuild_cache)
 
     model = LoRANormWearTLX(
         nvar=ckpt["nvar"],
@@ -125,7 +132,8 @@ def parse_args() -> argparse.Namespace:
 
 
 def main() -> None:
-    metrics = evaluate(parse_args())
+    args = parse_args()
+    metrics = evaluate(manifest=args.manifest, checkpoint=args.checkpoint, rebuild_cache=args.rebuild_cache, device=args.device)
     for key, value in metrics.items():
         print(f"{key}: {value:.4f}" if isinstance(value, float) else f"{key}: {value}")
 
