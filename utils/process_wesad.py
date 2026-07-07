@@ -1,4 +1,8 @@
 """
+----------------------------------------------------------------------------
+!!! !!! WARNING: this script opens pickle files from the WESAD dataset, which are not provided in this repository.
+Please make sure you trust the source of the WESAD dataset before running this script, as pickle files can execute arbitrary code when loaded.
+----------------------------------------------------------------------------
 Convert the raw WESAD dataset into a manifest.csv + .npy signal dataset,
 following the same method as process_cogload.py.
 
