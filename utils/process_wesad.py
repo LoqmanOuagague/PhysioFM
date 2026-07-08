@@ -66,7 +66,17 @@ manifest_rows = {"train": [], "test": []}
 
 
 def find_segments(label_array: np.ndarray, target_label: int):
-    """Return [(start, end), ...] index ranges (end exclusive) of contiguous runs where label == target_label."""
+    """Return [(start, end), ...] index ranges (end exclusive) of contiguous runs where label == target_label.
+
+    Used here to locate, within a subject's per-sample WESAD study-protocol
+    label array (700 Hz, one label per chest sample), the chest-signal index
+    ranges belonging to a given condition (e.g. target_label=2 for stress).
+    Each returned (start, end) is then used to slice out that condition's
+    chest segment (and the corresponding wrist segment) in process_subject,
+    before resampling and windowing it. A condition can occur in more than
+    one contiguous run per subject (e.g. if the protocol revisits it), so
+    this can return multiple segments for the same label.
+    """
     mask = (label_array == target_label).astype(np.int8)
     edges = np.flatnonzero(np.diff(np.concatenate(([0], mask, [0]))))
     return list(zip(edges[0::2].tolist(), edges[1::2].tolist()))
@@ -89,9 +99,13 @@ def process_subject(pkl_path: str, out_dir: str, train_split: float, subject_spl
     wrist_eda, wrist_temp = wrist["EDA"], wrist["TEMP"]
 
     n_written = 0
+    seg_counter = 0  # unique per subject, running across all conditions (not reset per condition)
     for raw_label, (condition, class_idx) in LABEL_TO_CONDITION.items():
-        for seg_i, (start, end) in enumerate(find_segments(label, raw_label)):
+        for start, end in find_segments(label, raw_label):
+            seg_i = seg_counter
+            seg_counter += 1
             if end - start < CHEST_SAMPLING_RATE * WINDOW_SECONDS:
+                # @TODO: Pad short segments instead of dropping them? (would require a new manifest column to indicate padding)
                 print(f"[skip] {uid} {condition} segment {seg_i}: shorter than {WINDOW_SECONDS}s")
                 continue
 
