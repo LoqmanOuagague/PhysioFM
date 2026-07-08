@@ -19,12 +19,14 @@ import hashlib
 import os
 import sys
 
+import pandas as pd
 import torch
 from torch.utils.data import Dataset
 from tqdm import tqdm
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, REPO_ROOT)
+from physioMoE.config import NASA_TLX_DIMENSIONS
 from physioMoE.data.dataset import PhysioTLXDataset
 from physioMoE.metrics import compute_metrics
 from NormWear.main_model import spec_cwt
@@ -41,6 +43,17 @@ def _manifest_fingerprint(manifest_path: str) -> str:
     silently reused across a different (e.g. truncated, regenerated) manifest."""
     with open(manifest_path, "rb") as f:
         return hashlib.md5(f.read()).hexdigest()[:10]
+
+
+def _segment_ids(manifest_path: str) -> list[str]:
+    """Group key identifying which task-segment each row's window was cut from
+    (rows share (uid, task, level) and differ only by their ``window`` index),
+    in the same row order as the manifest -- and thus the same order as
+    SpecDataset, since both are read from the same CSV."""
+    manifest = pd.read_csv(manifest_path, usecols=["uid", "task", "level"])
+    return (
+        manifest["uid"].astype(str) + "_" + manifest["task"].astype(str) + "_" + manifest["level"].astype(str)
+    ).tolist()
 
 
 class SpecDataset(Dataset):
@@ -115,8 +128,19 @@ def evaluate(
 
     preds = model(specs).cpu().numpy()
 
-    metrics = compute_metrics(preds, targets)
-    metrics["test_size"] = len(test_set)
+    # Windows are cut from the same task recording, so average their predictions
+    # (and targets, which are already identical within a segment) into one
+    # prediction per segment before scoring -- otherwise segments with more
+    # windows would be overrepresented in the metrics.
+    segment_ids = _segment_ids(manifest)
+    preds_df = pd.DataFrame(preds, columns=NASA_TLX_DIMENSIONS)
+    targets_df = pd.DataFrame(targets, columns=NASA_TLX_DIMENSIONS)
+    preds_seg = preds_df.groupby(segment_ids, sort=False).mean().to_numpy()
+    targets_seg = targets_df.groupby(segment_ids, sort=False).mean().to_numpy()
+
+    metrics = compute_metrics(preds_seg, targets_seg)
+    metrics["test_size"] = len(preds_seg)
+    metrics["test_windows"] = len(test_set)
     metrics["best_epoch"] = ckpt["epoch"]
     metrics["best_val_loss"] = ckpt["val_loss"]
     return metrics
