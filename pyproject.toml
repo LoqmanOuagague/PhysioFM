@@ -13,6 +13,7 @@ dependencies = [
     "pytorch-pretrained-vit>=0.0.7",
     "pywavelets>=1.9.0",
     "scikit-learn>=1.8.0",
+    "tables>=3.11.1",
     "tensorboard>=2.20.0",
     "tensorflow>=2.21.0",
     "timm>=1.0.27",
