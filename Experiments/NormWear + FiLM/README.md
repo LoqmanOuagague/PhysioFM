@@ -110,9 +110,10 @@ Every experiment reports **Accuracy, macro-Precision, macro-Recall, macro-F1, an
 AUC** on held-out data (LOSO: mean ± std across subject folds); the FiLM experiments additionally report
 `effective_r_minutes`, the baseline duration the learnable selector converged to.
 
-Per-window NormWear embeddings are cached to `data/WESAD/normwear_embed_cache.pt` after the first run (NormWear
-is frozen, so there's no reason to re-encode the same windows across experiments); delete that file to force a
-re-encode. See `run_ablation.py --help` / `train_linear_probe.py --help` for the full list of hyperparameters
+Per-window NormWear embeddings are cached to `data/WESAD/normwear_embed_cache/` (one file per sample, written as
+each embedding is computed) since NormWear is frozen and there's no reason to re-encode the same windows across
+experiments; delete that directory (or individual sample files) to force a re-encode. See `run_ablation.py --help`
+/ `train_linear_probe.py --help` for the full list of hyperparameters
 (hidden dim, dropout, epochs, learning rate, batch size, device, selector temperature, ...).
 
 ## Caveats
