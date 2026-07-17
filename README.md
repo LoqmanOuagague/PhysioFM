@@ -36,20 +36,34 @@ NormWear/                      # Core model, forked from the original repo
 data/                           # Downstream & pretraining datasets (gitignored, see below)
 
 utils/
+├── dataset_processing.py       # Shared machinery (parallel dispatch, windowing, train/test split) behind all process_*.py scripts
 ├── process_cogload.py          # My preprocessing script: raw CogLoad1 CSVs → NormWear-ready windows
-└── process_wesad.py            # My preprocessing script: raw WESAD .pkl files → NormWear-ready windows
+├── process_wesad.py            # My preprocessing script: raw WESAD .pkl files → NormWear-ready windows
+├── process_adabase.py          # My preprocessing script: raw ADABase .h5py files → NormWear-ready windows
+└── tests/                      # Unit tests for the dataset processing scripts above
 
 physioMoE/                      # Text-conditioned Mixture-of-Experts for NASA-TLX prediction (see below)
 ├── models/                     # Router, experts, text/NormWear encoders, PhysioMoE wiring
 ├── data/                       # PhysioTLXDataset (manifest CSV + .npy signals) used by train.py/evaluate.py
 ├── train.py / evaluate.py      # CLI training & checkpoint evaluation
 ├── tests/                      # Network-free unit tests (router gating, expert combination, forward/backward)
-└── Design_notes.md             # Design rationale and open questions
+└── Design_notes.md             # Design rationale, implemented baseline, and open questions
 
 CogLoad1 fullshot evaluation/  # Autonomous-agent ("autoresearch") LoRA fine-tuning of NormWear on CogLoad1
 ├── train.py                    # LoRA-adapted NormWear backbone + NASA-TLX head (the file the agent edits)
 ├── prepare.py                  # Fixed CWT spectrogram caching + held-out test evaluation (not modified)
 └── program.md                  # Agent instructions for the autonomous experiment loop
+
+Experiments/
+└── NormWear + FiLM/            # Ablation: does a personal (per-subject) baseline signal help a linear probe on WESAD? (see below)
+    ├── run_ablation.py         # Runs the full class-holdout/LOSO x plain/FiLM ablation in one pass
+    ├── train_linear_probe.py   # CLI for a single (split x FiLM) run
+    ├── experiment.py           # Shared embedding caching / train+eval core
+    ├── probe_model.py          # NormWearFiLMProbe: embeddings -> optional FiLM conditioning -> MLP classifier
+    ├── film.py                 # FiLMLayer: per-channel (gamma, beta) conditioning MLP
+    ├── baseline_selector.py    # LearnableBaselineSelector: learns how much baseline signal to average in
+    ├── normwear_loader.py      # Loads frozen NormWear, works around a trust_remote_code loading bug
+    └── wesad_dataset.py        # WESAD manifest loading + class-holdout/LOSO split builders
 
 docs/
 ├── Running_zeroshot_evaluation_of_NormWear.md   # Detailed zero-shot / HPC walkthrough
@@ -112,6 +126,8 @@ The processed downstream datasets from the original paper can be downloaded from
 
 Available from [Google Drive](https://drive.google.com/file/d/1WBlyweezkYm16PR3UFrO85XrZCKjqWmP/view?usp=sharing).
 
+All three `process_*.py` scripts below (CogLoad1, WESAD, ADABase) share the same [`utils/dataset_processing.py`](utils/dataset_processing.py) machinery: a dataset-specific script only has to supply how to read one participant's raw file and window its signal segments, while parallel dispatch across participants (`--n_jobs`), the train/test split (`--train_split`, `--split_mode {subject_dependent,subject_independent}`), and manifest writing are shared. Unit tests for this shared machinery and each dataset script live in [`utils/tests/`](utils/tests/).
+
 ### CogLoad1
 
 CogLoad1 is not part of the original NormWear release; it needs to be preprocessed locally with [`utils/process_cogload.py`](utils/process_cogload.py). Starting from raw per-participant sensor CSVs (`hr`, `gsr`, `rr`, `temperature`, and 3-axis wrist acceleration) plus a `personality_performance.csv` file with NASA-TLX scores per (task, level) segment, the script:
@@ -148,6 +164,22 @@ python3 utils/process_wesad.py \
     --train_split 0.8
 ```
 
+### ADABase (from raw)
+
+ADABase is likewise built from its raw per-subject release (`adabase-public-XXXX-v_0_0_2.h5py`; place it under `data/adabase_raw/`) with [`utils/process_adabase.py`](utils/process_adabase.py). Each subject file's `SIGNALS` table is a single dataframe merged onto one master clock (the fastest channel's rate, with slower channels `NaN` outside their own ticks); the script reads it with a hand-rolled chunked `h5py` reader rather than `pd.read_hdf(..., columns=[...])`, since selecting a column subset through pandas/pytables here still materializes the entire 57-column compressed block per participant (~7.8GB peak RSS, measured, vs. a ~370MB source file — enough to OOM (Out of memory) the machine once several participants are processed concurrently). For every NASA-TLX rating in the subject's `SUBJECTIVE` table, the script:
+
+1. Locates the matching `SIGNALS` rows via STUDY/PHASE/LEVEL and extracts the raw SKT/ECG(x2)/RSP/EMG/EDA channels (eye-tracking/facial-AU columns are a different modality and are left out);
+2. Resamples each native-rate channel group to **65 Hz** independently and stacks them channel-wise;
+3. Splits the result into non-overlapping **6-second windows**, zero-padding a short trailing window instead of dropping it;
+4. Randomly assigns each segment to train/test and writes one `.npy` file per window plus a manifest CSV, using the same `subject_dependent` / `subject_independent` split modes as the other two scripts.
+
+```sh
+python3 utils/process_adabase.py \
+    --raw_dir data/adabase_raw \
+    --out_dir data/ADABase \
+    --train_split 0.8
+```
+
 ## Environment variables (`.env`)
 
 | Variable | Purpose |
@@ -171,16 +203,26 @@ CUDA_VISIBLE_DEVICES=0 python3 -m NormWear.zero_shot.zero_shot_inference_paralle
 
 [`CogLoad1 fullshot evaluation/`](CogLoad1%20fullshot%20evaluation/) fine-tunes the NormWear backbone with LoRA adapters plus a small NASA-TLX regression head directly on CogLoad1's raw signals (as opposed to the frozen-embedding + linear-probe path used by `NormWear/downstream_main.py`). It follows the ["autoresearch"](https://github.com/karpathy/nanochat) methodology (adapted from Karpathy's nanochat repo): a coding agent is pointed at [`program.md`](CogLoad1%20fullshot%20evaluation/program.md) and left to iterate on `train.py` autonomously — each run trains for a fixed 10-minute wall-clock budget, is evaluated on the held-out test split via `prepare.py`'s frozen `evaluate()`, and is kept or discarded based on `overall_mae`, with every attempt logged to an untracked `results.tsv`. `prepare.py` (CWT spectrogram caching + the ground-truth evaluation) is off-limits to the agent; only `train.py` (LoRA rank/targets, head architecture, optimizer, hyperparameters, ...) is fair game. See that folder's [`README.md`](CogLoad1%20fullshot%20evaluation/README.md) for the full methodology and `program.md` for the exact experiment loop.
 
+## Ablation: does a personal physiological baseline help? (NormWear + FiLM)
+
+[`Experiments/NormWear + FiLM/`](Experiments/NormWear%20+%20FiLM/) asks whether conditioning a frozen-NormWear linear probe on a subject's own resting-state (`baseline`) signal — via a [FiLM](https://arxiv.org/abs/1709.07871) layer — improves classification of the WESAD study protocol (baseline/stress/amusement) over an unconditioned probe. How much baseline signal to use isn't fixed by hand: `baseline_selector.LearnableBaselineSelector` learns an effective window count (up to a user-specified `--r_minutes_max` cap) jointly with the classifier via a soft, differentiable cutoff. The ablation runs both a plain probe and the FiLM-conditioned one across two generalization axes — class-holdout (novel class unseen in training) and leave-one-subject-out — since a personal baseline could as easily help (calibrate against individual physiology) as hurt (overfit to per-subject idiosyncrasies instead of the general stress/amusement signal). See that folder's [`README.md`](Experiments/NormWear%20+%20FiLM/README.md) for the full methodology.
+
+```sh
+# the full ablation study (3 novel-class choices x plain/FiLM + LOSO x plain/FiLM), saved to results/ablation_results.json
+python "Experiments/NormWear + FiLM/run_ablation.py" --r_minutes_max 5
+```
+
 ## Roadmap: physioMoE
 
-[`physioMoE/`](physioMoE/) is a **Mixture-of-Experts** extension inspired by [Mixtral](https://arxiv.org/abs/2401.04088) that already has an initial implementation (router, expert bank, text/NormWear encoders, training/evaluation CLIs, unit tests — see [`physioMoE/README.md`](physioMoE/README.md)): it routes physiological embeddings through multiple expert sub-networks (each specializing in patterns from different datasets/tasks), conditioned by a text encoding of the task and its context, to predict NASA-TLX workload scores while keeping the number of active parameters small. Open design questions still being iterated on, tracked in [`physioMoE/Design_notes.md`](physioMoE/Design_notes.md), include:
+[`physioMoE/`](physioMoE/) is a **Mixture-of-Experts** extension inspired by [Mixtral](https://arxiv.org/abs/2401.04088), though the motivation doesn't transfer directly: physioMoE isn't compute-constrained at inference (a few small MLP experts are cheap regardless of how many are active), so the point isn't fewer active parameters — it's that heterogeneous physiological workload data (different tasks, sensors, populations) may be better served by several *specialized* expert heads than one dense head averaging across all of them, in the spirit of the classical Jacobs et al. 1991 mixture-of-experts. The baseline is already implemented (see [`physioMoE/README.md`](physioMoE/README.md)): frozen NormWear + a learned channel-attention pool for the signal embedding, frozen MiniLM for the task-text embedding, an MLP router (dense softmax or top-k) conditioned on both, 4 expert MLPs each predicting all six NASA-TLX dimensions, combined via the router's gate weights and trained with MSE plus a load-balancing auxiliary loss. Open design questions still being iterated on against that baseline, tracked in [`physioMoE/Design_notes.md`](physioMoE/Design_notes.md), include:
 
+- **Context conditioning** — beyond task-description text (implemented), whether/how to add participant-trait text, a personal baseline signal (à la the [FiLM ablation](#ablation-does-a-personal-physiological-baseline-help-normwear--film) above), or FiLM-based conditioning of the router/experts instead of plain concatenation.
 - **Resampling robustness** — making the model less dependent on a fixed 65 Hz input rate.
-- **Fusion mechanism** for combining per-channel signal embeddings (averaging, CNN, CLS-token fusion).
-- **Router network** architecture and the text encoder used to condition it.
-- **Task-context prompting** — how the text description of a task/environment is phrased, and how much it matters.
-- **Dataset splitting strategy** — classic train/test vs. leave-one-participant-out.
-- **Training strategy** — joint end-to-end training vs. training each expert independently then freezing it while training the router.
+- **Signal-embedding fusion** beyond the implemented attention pooling — e.g. a CNN over stacked per-channel embeddings.
+- **Router architecture** — alternatives to the MLP baseline (key-based similarity routing, noisy top-k, hierarchical routing).
+- **Text encoder and prompt design** — alternatives to frozen MiniLM, and how the task-description prompt itself should be phrased.
+- **Dataset splitting strategy** — classic train/test vs. leave-one-participant-out (LOPO preferred by default reasoning).
+- **Training regime** — joint end-to-end training vs. training each expert independently then freezing it while training the router; per-dimension uncertainty weighting for the 6 NASA-TLX loss terms (not yet implemented).
 
 ## Citation
 
