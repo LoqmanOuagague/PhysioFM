@@ -50,6 +50,18 @@ class-generalization and a subject-generalization angle.
    across all 10 channels, conditioned on each channel's own baseline embedding, so parameter count doesn't scale
    with channel count.
 
+## The plain arm is capacity-matched, not just smaller
+
+The `--no-use_film` arm isn't a bare linear probe next to a bigger FiLM-augmented model — that would confound
+"does personal-baseline conditioning help" with "does having more trainable parameters at all help". Instead,
+`probe_model._matched_hidden_dim` widens the plain classifier's hidden layer so its total trainable parameter
+count equals a same-`hidden_dim` FiLM probe's (its own classifier + `FiLMLayer` + `LearnableBaselineSelector`),
+closed-form (both classifiers are the same affine-in-hidden-width shape, and FiLM's own hidden width is a fixed
+constant independent of the probe's `hidden_dim`, so matching total params reduces to adding a constant offset to
+the hidden width — no search needed). The result lands within ~0.01% of the target parameter count (an
+unavoidable integer-rounding residual). So the "plain" arm is really a small neural network with one wider hidden
+layer, at equal capacity to its FiLM counterpart — the ablation isolates what FiLM's *conditioning* buys, not
+model size.
 
 ## The experiments
 
@@ -80,6 +92,55 @@ Comparing each class-holdout FiLM run against its plain counterpart, and LOSO-Fi
 actual ablation: if FiLM helps on some novel classes but not others, or helps class-holdout but not LOSO, that's
 evidence about *what kind* of generalization the personal baseline is (or isn't) buying.
 
+## Training stops itself: early stopping on train_loss
+
+Training no longer runs for a fixed number of epochs. `--epochs` is now only an **upper bound**: every fit
+(hyperparameter-search trials included) tracks the best `train_loss` seen so far and stops as soon as it hasn't
+improved by at least `--min_delta` for `--patience` epochs in a row (`experiment.train_probe`). This applies
+uniformly to class-holdout, LOSO, and every hyperparameter-search trial, since they all go through the same
+training loop. `--patience` and `--min_delta` are themselves searched (see below), so each experiment can settle
+on its own stopping point rather than sharing one hand-picked epoch count.
+
+## Hyperparameter tuning (and where the validation set comes from)
+
+Unless `--no-tune`, every one of the 8 experiments above searches its own hyperparameters independently —
+`hidden_dim`, `dropout`, `lr`, `weight_decay`, `batch_size`, `patience`, and `min_delta` (`experiment.
+HP_SEARCH_SPACE`) — by random search (`experiment.hyperparameter_search`, `--n_trials` trials, each a short fit of
+`--search_epochs` epochs) that maximizes **macro-F1** on a validation set carved **only out of that experiment's
+training set**. `selector_temperature` is fixed at `--selector_temperature` (not searched — see Caveats) for every
+trial. The test set/fold is never touched until the winning config is refit (for the full `--epochs`, still
+subject to early stopping) on the complete training set and scored once.
+
+Where the validation set comes from depends on the split, since a class-holdout run has one fixed training pool
+but a LOSO run doesn't:
+
+- **Class-holdout**: `wesad_dataset.carve_validation_split` takes `--val_frac` (default 20%) of `train_rows`,
+  stratified by condition, as validation; the search trains on the rest.
+- **LOSO**: there's no single training set to carve a row-fraction out of — the axis under test is subject
+  generalization, so the validation unit is a whole subject too. `wesad_dataset.loso_validation_split` reserves
+  one participant (chosen deterministically from `--seed`) as the validation fold: the search trains on every
+  *other* subject and scores macro-F1 on the reserved one. Tuning runs once per experiment, not once per LOSO
+  test fold (which would multiply the search cost ~15x for no benefit, since all folds of the same experiment
+  should use the same hyperparameters to remain comparable). Once tuning is done, that reserved subject rejoins
+  the pool and takes its normal turn as a test fold in the real evaluation loop — by then no reported test metric
+  has influenced which hyperparameters were picked.
+
+Both experiment result dicts (and the saved JSON) include the winning `config` and the full `hp_search` trial
+history (each trial's `val_f1_macro`).
+
+## Per-epoch loss logging (LOSO)
+
+Every LOSO fold's final fit (not the hyperparameter-search trials) now logs `train_loss` and `val_loss` — the
+held-out fold's loss, evaluated every epoch — to the console (`epoch N/E  train_loss=...  val_loss=...`), and the
+full per-fold curves are saved into the result under `loss_history` (`{uid: [{epoch, train_loss, val_loss}, ...]}`),
+alongside the existing `per_fold` metrics.
+
+## Resource usage saved with results
+
+`run_ablation.py` also snapshots the hardware/resource footprint of the whole run — GPU name + VRAM, the number of
+CPUs actually available to the process, and peak RSS — and saves it under a top-level `resource_usage` key in
+`ablation_results.json`, alongside `config` and `results`.
+
 ## Files
 
 | File | Purpose |
@@ -99,11 +160,11 @@ From the repo root:
 
 ```bash
 # the full ablation study (3 novel-class choices x plain/FiLM + LOSO x plain/FiLM), saved to results/ablation_results.json
-python "Experiments/NormWear + FiLM/run_ablation.py" --r_minutes_max 5
+python Experiments/NormWear_FiLM/run_ablation.py --r_minutes_max 5
 
 # iterate on a single configuration instead
-python "Experiments/NormWear + FiLM/train_linear_probe.py" --eval_mode class_holdout --novel_class stress --use_film --r_minutes_max 5
-python "Experiments/NormWear + FiLM/train_linear_probe.py" --eval_mode loso --no-use_film
+python Experiments/NormWear_FiLM/train_linear_probe.py --eval_mode class_holdout --novel_class stress --use_film --r_minutes_max 5
+python Experiments/NormWear_FiLM/train_linear_probe.py --eval_mode loso --no-use_film
 ```
 
 Every experiment reports **Accuracy, macro-Precision, macro-Recall, macro-F1, and macro-averaged one-vs-one ROC
@@ -114,7 +175,8 @@ Per-window NormWear embeddings are cached to `data/WESAD/normwear_embed_cache/` 
 each embedding is computed) since NormWear is frozen and there's no reason to re-encode the same windows across
 experiments; delete that directory (or individual sample files) to force a re-encode. See `run_ablation.py --help`
 / `train_linear_probe.py --help` for the full list of hyperparameters
-(hidden dim, dropout, epochs, learning rate, batch size, device, selector temperature, ...).
+(hidden dim, dropout, max epochs, early-stopping patience/min_delta, learning rate, batch size, device, selector
+temperature, ...).
 
 ## Caveats
 
@@ -124,6 +186,7 @@ experiments; delete that directory (or individual sample files) to force a re-en
 - LOSO trains one probe per subject (~15 short training runs); each is fast once embeddings are cached, but it's
   roughly 15x the training cost of a single class-holdout run. `run_ablation.py` runs 8 probes total (3 novel
   classes x 2 (plain/FiLM), plus LOSO x 2 (plain/FiLM), where each LOSO run is itself ~15 folds).
-- The learnable selector's soft cutoff has a fixed `--selector_temperature` (not itself learned) controlling how
-  sharp the window-count boundary is; very small values make the gradient near the boundary vanish, very large
-  values make the effective count barely distinguishable from a uniform average over all candidate windows.
+- The learnable selector's soft cutoff has a fixed `--selector_temperature` (not itself learned, and not part of
+  the hyperparameter search — see above) controlling how sharp the window-count boundary is; very small values
+  make the gradient near the boundary vanish, very large values make the effective count barely distinguishable
+  from a uniform average over all candidate windows.

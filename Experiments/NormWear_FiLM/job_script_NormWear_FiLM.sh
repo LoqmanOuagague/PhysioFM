@@ -9,16 +9,16 @@
 # BEGIN INFORMATIONAL OPTIONS
 #SBATCH --job-name="Ablation study on NormWear and FiLM"        # Name for your job
 #SBATCH --comment=""  # Comment for your job
-#SBATCH --output=tmp/cogload_eval.out      # Output file
-#SBATCH --error=tmp/cogload_eval.err       # Error file
+#SBATCH --output=tmp/ablation_film_normwear_%j.out      # Output file
+#SBATCH --error=tmp/ablation_film_normwear_%j.err       # Error file
 #SBATCH --mail-type=BEGIN,END,FAIL   # Mail on start and end job
 #SBATCH --mail-user=loqman.ouagague@ec-nantes.fr  # Email address for the job
 # END INFORMATIONAL OPTIONS
 
 # BEGIN RESOURCES OPTIONS
-#SBATCH --partition=standard      # partition standard
+#SBATCH --partition=gpu      # partition standard
 #SBATCH --ntasks=32            # How many CPUs to use
-##SBATCH --gres=gpu:1           # How many GPUs to use
+#SBATCH --gres=gpu:1           # How many GPUs to use
 # END RESOURCES OPTIONS
 
 
@@ -35,5 +35,5 @@ cd /scratch/nautilus/projects/physioFM/NormWear
 source .venv/bin/activate
 
 # Run your Python script
-python3 Experiments/NormWear\ +\ FiLM/run_ablation.py
+python3 -u Experiments/NormWear_FiLM/run_ablation.py
 exit

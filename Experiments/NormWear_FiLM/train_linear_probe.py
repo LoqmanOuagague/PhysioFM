@@ -33,6 +33,18 @@ Pipeline:
      the classifier head, by gradient descent on the training loss -- how
      many of them to actually average into the FiLM conditioning embedding.
      The value it converges to is reported as effective_r_minutes.
+  5. --no-use_film runs don't use a plain linear probe: probe_model.py widens
+     its classifier so its trainable parameter count matches a same-hidden_dim
+     FiLM probe's (classifier + FiLMLayer + LearnableBaselineSelector) exactly,
+     so the two arms are compared at equal capacity.
+  6. Unless --no-tune, hyperparameters (hidden_dim, dropout, lr, weight_decay,
+     batch_size, patience, and min_delta -- the latter two controlling early
+     stopping on train_loss, see experiment.ProbeConfig) are searched by
+     `experiment.hyperparameter_search` on a validation split carved out of
+     the training set only (--eval_mode class_holdout: --val_frac of
+     train_rows; --eval_mode loso: one reserved subject) -- the test set/fold
+     is never used to pick hyperparameters. selector_temperature is fixed
+     (not searched); see --selector_temperature.
 """
 
 from __future__ import annotations
@@ -58,14 +70,20 @@ def get_args_parser():
     parser.add_argument("--eval_mode", choices=["class_holdout", "loso"], default="class_holdout")
     parser.add_argument("--novel_class", choices=TASK_CLASSES, default=None, help="Required for --eval_mode class_holdout: the class withheld entirely from training")
     parser.add_argument("--train_frac", type=float, default=0.8, help="Only used by --eval_mode class_holdout")
+    parser.add_argument("--tune", action=argparse.BooleanOptionalAction, default=True, help="Search hyperparameters on a validation split carved from the training set before the final fit (never the test set/fold)")
+    parser.add_argument("--val_frac", type=float, default=0.2, help="class_holdout only: fraction of train_rows carved out as the tuning validation set")
+    parser.add_argument("--n_trials", type=int, default=12, help="Number of random hyperparameter-search trials")
+    parser.add_argument("--search_epochs", type=int, default=None, help="Epochs used only during hyperparameter search trials (default: min(epochs, 15))")
     parser.add_argument("--use_film", action=argparse.BooleanOptionalAction, default=True, help="Condition the probe on a learned baseline-signal embedding via FiLM")
     parser.add_argument("--r_minutes_max", type=float, default=5.0, help="Upper bound (minutes) on the subject baseline signal the learnable selector may draw on")
-    parser.add_argument("--selector_temperature", type=float, default=1.0, help="Softness of the learned baseline-window cutoff (in window units); smaller = sharper")
+    parser.add_argument("--selector_temperature", type=float, default=0.1, help="Softness of the learned baseline-window cutoff (in window units); smaller = sharper")
     parser.add_argument("--hidden_dim", type=int, default=256)
     parser.add_argument("--dropout", type=float, default=0.3)
     parser.add_argument("--batch_size", type=int, default=64)
     parser.add_argument("--embed_batch_size", type=int, default=16, help="Batch size used only for the one-off NormWear encoding pass")
-    parser.add_argument("--epochs", type=int, default=30)
+    parser.add_argument("--epochs", type=int, default=30, help="Upper bound on training epochs; training early-stops once train_loss stops improving (see --patience)")
+    parser.add_argument("--patience", type=int, default=10, help="Epochs of no train_loss improvement (beyond --min_delta) before early-stopping")
+    parser.add_argument("--min_delta", type=float, default=1e-4, help="Smallest train_loss decrease that counts as an improvement, for early stopping")
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--weight_decay", type=float, default=1e-4)
     parser.add_argument("--seed", type=int, default=42)
@@ -100,6 +118,8 @@ def main():
         dropout=args.dropout,
         batch_size=args.batch_size,
         epochs=args.epochs,
+        patience=args.patience,
+        min_delta=args.min_delta,
         lr=args.lr,
         weight_decay=args.weight_decay,
         seed=args.seed,
@@ -108,13 +128,17 @@ def main():
 
     if args.eval_mode == "class_holdout":
         result = run_class_holdout_experiment(
-            manifest, rows, cache, config, manifest.classes, args.novel_class, train_frac=args.train_frac, split_seed=args.seed
+            manifest, rows, cache, config, manifest.classes, args.novel_class, train_frac=args.train_frac, split_seed=args.seed,
+            tune=args.tune, val_frac=args.val_frac, n_trials=args.n_trials, search_epochs=args.search_epochs,
         )
         print(f"\nTest metrics (novel_class={args.novel_class}):")
         for k, v in result["metrics"].items():
             print(f"  {k}: {v:.4f}" if isinstance(v, float) else f"  {k}: {v}")
     else:
-        result = run_loso_experiment(manifest, rows, cache, config, manifest.classes)
+        result = run_loso_experiment(
+            manifest, rows, cache, config, manifest.classes,
+            tune=args.tune, n_trials=args.n_trials, search_epochs=args.search_epochs, tune_seed=args.seed,
+        )
         print("\nLOSO mean +- std across {} subjects:".format(len(result["per_fold"])))
         for k in result["mean"]:
             print(f"  {k}: {result['mean'][k]:.4f} +- {result['std'][k]:.4f}")

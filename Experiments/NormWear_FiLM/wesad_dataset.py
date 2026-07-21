@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import math
 import os
+import random
 from dataclasses import dataclass
 
 import numpy as np
@@ -126,6 +127,32 @@ def loso_folds(rows: pd.DataFrame):
         test_rows = rows[rows["uid"] == uid].reset_index(drop=True)
         train_rows = rows[rows["uid"] != uid].reset_index(drop=True)
         yield uid, train_rows, test_rows
+
+
+def carve_validation_split(rows: pd.DataFrame, val_frac: float = 0.2, seed: int = 42) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Carves a hyperparameter-tuning validation set out of a *training* row
+    pool (never the test set/fold): a `val_frac` held-out slice, stratified
+    by condition so class balance is preserved on both sides. Used for the
+    class-holdout experiments' HP search -- the analogue of `loso_validation_
+    split` below for the subject-holdout (LOSO) experiments, where the
+    validation unit is a whole participant rather than a row fraction."""
+    search_train, val = train_test_split(rows, test_size=val_frac, stratify=rows["condition"], random_state=seed, shuffle=True)
+    return search_train.reset_index(drop=True), val.reset_index(drop=True)
+
+
+def loso_validation_split(rows: pd.DataFrame, seed: int = 42) -> tuple[str, pd.DataFrame, pd.DataFrame]:
+    """Reserves one subject (folder/participant) as the validation fold for
+    LOSO hyperparameter search: trains on every other subject, validates on
+    this one. That reserved subject still takes its normal turn as a test
+    fold later in the real `loso_folds` evaluation loop -- by then HP tuning
+    is already finished, so its data being used for training in every *other*
+    fold, and as the held-out fold in its own, is exactly as legitimate as
+    any other subject's; only the search phase ever scores against it."""
+    subject_ids = sorted(rows["uid"].unique())
+    val_uid = random.Random(seed).choice(subject_ids)
+    val_rows = rows[rows["uid"] == val_uid].reset_index(drop=True)
+    search_train_rows = rows[rows["uid"] != val_uid].reset_index(drop=True)
+    return val_uid, search_train_rows, val_rows
 
 
 def build_baseline_sequences(
