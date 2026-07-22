@@ -1,7 +1,61 @@
 (function () {
   "use strict";
-  const DATA = JSON.parse(document.getElementById("app-data").textContent);
+  const RESULTS_URL = "../results/ablation_results.json";
+  let DATA = null;
   const SVGNS = "http://www.w3.org/2000/svg";
+
+  // ---------------- trainable-parameter count ----------------
+  // ablation_results.json records each run's *nominal* hidden_dim (the
+  // hyperparameter-search knob) but not its resulting trainable-parameter
+  // count, so it's reconstructed here from the same closed-form arithmetic
+  // as probe_model.py's NormWearFiLMProbe: a Linear->BatchNorm1d->GELU->
+  // Dropout->Linear classifier (affine in hidden width h with slope
+  // in_dim + num_classes + 3), plus, for the FiLM arm, a fixed-size
+  // FiLMLayer + LearnableBaselineSelector; the plain arm instead widens h
+  // (_matched_hidden_dim) so its total matches a same-hidden_dim FiLM probe.
+  const EMBED_DIM = 768;               // normwear_loader.EMBED_DIM
+  const NUM_CHANNELS = 10;             // WESAD: ACC x/y/z, ECG, EMG, EDA, Temp, Resp (chest) + EDA, Temp (wrist)
+  const NUM_CLASSES = 3;               // baseline / stress / amusement
+  const FILM_HIDDEN = 256;             // FiLMLayer's own hidden width (film.py default)
+  const IN_DIM = NUM_CHANNELS * EMBED_DIM;
+  const CLASSIFIER_SLOPE = IN_DIM + NUM_CLASSES + 3;
+  const FILM_AND_SELECTOR_PARAMS =
+    (EMBED_DIM * FILM_HIDDEN + FILM_HIDDEN) +      // FiLMLayer net[0]: Linear(cond_dim, hidden)
+    (FILM_HIDDEN * 2 * EMBED_DIM + 2 * EMBED_DIM) + // FiLMLayer net[2]: Linear(hidden, 2*feature_dim)
+    1;                                               // LearnableBaselineSelector.raw_r
+
+  function classifierParams(hiddenDim) {
+    return hiddenDim * CLASSIFIER_SLOPE + NUM_CLASSES;
+  }
+  function computeParams(run) {
+    const nominalHidden = run.config.hidden_dim;
+    if (run.use_film) return classifierParams(nominalHidden) + FILM_AND_SELECTOR_PARAMS;
+    const matchedHidden = Math.max(1, Math.round(nominalHidden + FILM_AND_SELECTOR_PARAMS / CLASSIFIER_SLOPE));
+    return classifierParams(matchedHidden);
+  }
+
+  // ---------------- load + normalize results ----------------
+  // ablation_results.json is {config, resource_usage, results: {key: run}};
+  // the rest of this file expects {config, runs: [run, ...]} with an
+  // explicit novel_class (raw LOSO runs omit the key entirely) and a
+  // params field per run.
+  function normalize(raw) {
+    const runs = Object.entries(raw.results).map(([key, run]) => {
+      const novel_class = run.novel_class != null ? run.novel_class : null;
+      return Object.assign({ key, novel_class }, run, { params: computeParams(run) });
+    });
+    return { config: raw.config, resource_usage: raw.resource_usage, runs };
+  }
+
+  function showBanner(kind, html) {
+    const el = document.getElementById("load-banner");
+    el.className = "load-banner " + kind;
+    el.innerHTML = html;
+    el.hidden = false;
+  }
+  function hideBanner() {
+    document.getElementById("load-banner").hidden = true;
+  }
 
   const METRICS = [
     { key: "accuracy",         label: "Accuracy",        short: "Acc"  },
@@ -35,7 +89,7 @@
   let currentMetric = "accuracy";
 
   // ---------------- config strip ----------------
-  (function renderConfig() {
+  function renderConfig() {
     const c = DATA.config;
     const items = [
       ["Dataset", "WESAD"],
@@ -47,10 +101,16 @@
     ];
     const el = document.getElementById("config-strip");
     el.innerHTML = items.map(([k, v]) => `<span class="chip">${k} <b>${v}</b></span>`).join("");
-  })();
+
+    const src = document.getElementById("data-source-line");
+    src.innerHTML = `Data: <code class="inline">Experiments/NormWear_FiLM/results/ablation_results.json</code> &middot; ` +
+      `${c.n_trials} random‑search trials &times; ${c.search_epochs} search epochs per experiment ` +
+      `(${c.tune ? "tuned" : "not tuned"}), best config retrained for up to ${c.epochs} epochs ` +
+      `(early‑stopped after ${c.patience} epochs without improvement) &middot; seed ${c.seed}.`;
+  }
 
   // ---------------- metric toggle ----------------
-  (function renderToggle() {
+  function renderToggle() {
     const el = document.getElementById("metric-toggle");
     el.innerHTML = METRICS.map(m =>
       `<button data-metric="${m.key}" role="tab" aria-selected="${m.key === currentMetric}">${m.label}</button>`
@@ -66,7 +126,151 @@
         renderAll();
       });
     });
-  })();
+  }
+
+  // ---------------- page tabs ----------------
+  const RESULTS_ONLY_TOOLBAR_IDS = ["toolbar-sep", "metric-label", "metric-toggle", "arm-legend"];
+  function renderPageTabs() {
+    const el = document.getElementById("page-tabs");
+    el.querySelectorAll("button").forEach(btn => {
+      btn.classList.toggle("active", btn.dataset.tab === "results");
+      btn.setAttribute("aria-selected", btn.dataset.tab === "results");
+      btn.addEventListener("click", () => selectTab(btn.dataset.tab));
+    });
+  }
+  function selectTab(tab) {
+    document.querySelectorAll("#page-tabs button").forEach(b => {
+      b.classList.toggle("active", b.dataset.tab === tab);
+      b.setAttribute("aria-selected", b.dataset.tab === tab);
+    });
+    ["results", "hyperparams", "resources"].forEach(t => {
+      document.getElementById("panel-" + t).hidden = t !== tab;
+    });
+    RESULTS_ONLY_TOOLBAR_IDS.forEach(id => { document.getElementById(id).hidden = tab !== "results"; });
+  }
+
+  // ---------------- hyperparameters tab ----------------
+  function renderRunConfig() {
+    const c = DATA.config;
+    const items = [
+      ["Tune", c.tune ? "Yes" : "No"],
+      ["Trials / experiment", c.n_trials],
+      ["Search epochs", c.search_epochs],
+      ["Max epochs", c.epochs],
+      ["Patience", c.patience],
+      ["Min delta", c.min_delta],
+      ["r_minutes_max", c.r_minutes_max + " min"],
+      ["Selector temperature", c.selector_temperature],
+      ["Hidden dim (nominal)", c.hidden_dim],
+      ["Dropout", c.dropout],
+      ["Batch size", c.batch_size],
+      ["Embed batch size", c.embed_batch_size],
+      ["LR", c.lr],
+      ["Weight decay", c.weight_decay],
+      ["Train frac", c.train_frac],
+      ["Val frac", c.val_frac],
+      ["Seed", c.seed],
+      ["Device", c.device],
+    ];
+    document.getElementById("run-config-grid").innerHTML =
+      items.map(([k, v]) => `<span class="chip">${k} <b>${v}</b></span>`).join("");
+
+    const paths = [
+      ["Data root", c.data_root],
+      ["Embed cache", c.embed_cache || `${c.data_root}/normwear_embed_cache (default)`],
+      ["Results path", c.results_path],
+    ];
+    document.getElementById("run-config-paths").innerHTML =
+      paths.map(([k, v]) => `<div class="path-row"><b>${k}</b><code class="mono">${v}</code></div>`).join("");
+  }
+
+  const HP_TABLE_COLS = [
+    { key: "experiment", label: "Experiment", sort: (a, b) => a.expLabel.localeCompare(b.expLabel) },
+    { key: "arm", label: "Arm", sort: (a, b) => Number(a.use_film) - Number(b.use_film) },
+    { key: "hidden_dim", label: "Hidden", sort: (a, b) => a.config.hidden_dim - b.config.hidden_dim },
+    { key: "dropout", label: "Dropout", sort: (a, b) => a.config.dropout - b.config.dropout },
+    { key: "lr", label: "LR", sort: (a, b) => a.config.lr - b.config.lr },
+    { key: "weight_decay", label: "Weight decay", sort: (a, b) => a.config.weight_decay - b.config.weight_decay },
+    { key: "batch_size", label: "Batch", sort: (a, b) => a.config.batch_size - b.config.batch_size },
+    { key: "patience", label: "Patience", sort: (a, b) => a.config.patience - b.config.patience },
+    { key: "min_delta", label: "Min delta", sort: (a, b) => a.config.min_delta - b.config.min_delta },
+    { key: "selector_temperature", label: "Selector temp", sort: (a, b) => (a.use_film ? a.config.selector_temperature : -1) - (b.use_film ? b.config.selector_temperature : -1) },
+    { key: "best_val_f1", label: "Best val F1 (search)", sort: (a, b) => bestValF1(a) - bestValF1(b) },
+  ];
+  function bestValF1(run) {
+    if (!run.hp_search || !run.hp_search.length) return null;
+    return Math.max(...run.hp_search.map(t => t.val_f1_macro));
+  }
+  let hpTableSort = { key: null, dir: 1 };
+
+  function renderHPTableHead() {
+    const head = document.getElementById("hp-table-head");
+    head.innerHTML = "";
+    HP_TABLE_COLS.forEach(c => {
+      const th = document.createElement("th");
+      th.tabIndex = 0;
+      th.innerHTML = c.label + (hpTableSort.key === c.key ? `<span class="arrow">${hpTableSort.dir > 0 ? "▲" : "▼"}</span>` : "");
+      th.addEventListener("click", () => {
+        if (hpTableSort.key === c.key) hpTableSort.dir *= -1; else { hpTableSort.key = c.key; hpTableSort.dir = 1; }
+        renderHPTable();
+      });
+      head.appendChild(th);
+    });
+  }
+  function renderHPTableBody() {
+    let rows = tableRows();
+    const col = HP_TABLE_COLS.find(c => c.key === hpTableSort.key);
+    if (col && col.sort) {
+      rows = rows.slice().sort((a, b) => col.sort(a, b) * hpTableSort.dir);
+    } else {
+      rows.sort((a, b) => a.expLabel.localeCompare(b.expLabel) || Number(a.use_film) - Number(b.use_film));
+    }
+    const body = document.getElementById("hp-table-body");
+    body.innerHTML = rows.map(r => {
+      const c = r.config;
+      const bestF1 = bestValF1(r);
+      return `<tr>
+        <td>${r.expLabel}</td>
+        <td><span class="tag ${r.use_film ? "film" : "plain"}">${r.use_film ? "FiLM" : "Plain"}</span></td>
+        <td>${c.hidden_dim}</td>
+        <td>${c.dropout}</td>
+        <td>${c.lr}</td>
+        <td>${c.weight_decay}</td>
+        <td>${c.batch_size}</td>
+        <td>${c.patience}</td>
+        <td>${c.min_delta}</td>
+        <td>${r.use_film ? c.selector_temperature : "—"}</td>
+        <td>${bestF1 != null ? bestF1.toFixed(4) : "—"}</td>
+      </tr>`;
+    }).join("");
+  }
+  function renderHPTable() { renderHPTableHead(); renderHPTableBody(); }
+
+  // ---------------- resource usage tab ----------------
+  function renderResourceUsage() {
+    const r = DATA.resource_usage || {};
+    const tiles = [
+      {
+        label: "GPU", value: r.gpu_name || "None (CPU)",
+        sub: r.gpu_vram_gb != null ? `${r.gpu_vram_gb} GB VRAM` : `--device ${DATA.config.device} requested`,
+      },
+      {
+        label: "CPUs available", value: r.cpu_count != null ? r.cpu_count : "—",
+        sub: "logical CPUs visible to the process (os.sched_getaffinity)",
+      },
+      {
+        label: "Peak memory (RSS)", value: r.max_rss_mb != null ? (r.max_rss_mb >= 1024 ? (r.max_rss_mb / 1024).toFixed(2) + " GB" : r.max_rss_mb.toFixed(0) + " MB") : "—",
+        sub: "peak resident set size across the whole run (all 8 experiments)",
+      },
+    ];
+    document.getElementById("resource-grid").innerHTML = tiles.map(t => `
+      <div class="kpi">
+        <div class="k-label">${t.label}</div>
+        <div class="k-value mono">${t.value}</div>
+        <div class="k-sub">${t.sub}</div>
+      </div>
+    `).join("");
+  }
 
   // ---------------- tooltip ----------------
   const tt = document.getElementById("tooltip");
@@ -540,7 +744,32 @@
   }
 
   document.addEventListener("mousemove", e => { if (tt.classList.contains("show")) moveTooltip(e); });
-  window.addEventListener("resize", () => { renderMainChart(); renderSubjectChart(); renderScatter(); });
+  window.addEventListener("resize", () => { if (DATA) { renderMainChart(); renderSubjectChart(); renderScatter(); } });
 
-  renderAll();
+  // ================= load =================
+  showBanner("info", `Loading results from <code class="inline">${RESULTS_URL}</code>&hellip;`);
+  fetch(RESULTS_URL)
+    .then(res => {
+      if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+      return res.json();
+    })
+    .then(raw => {
+      DATA = normalize(raw);
+      hideBanner();
+      renderConfig();
+      renderToggle();
+      renderPageTabs();
+      renderRunConfig();
+      renderHPTable();
+      renderResourceUsage();
+      renderAll();
+    })
+    .catch(err => {
+      showBanner("error",
+        `<b>Couldn't load results.</b> Fetching <code class="inline">${RESULTS_URL}</code> failed: ${err.message}.<br>` +
+        `If you opened this file directly (<code class="inline">file://</code>), browsers block local <code class="inline">fetch</code> ` +
+        `— serve the dashboard over HTTP instead, e.g. <code class="inline">python3 -m http.server</code> from ` +
+        `<code class="inline">Experiments/NormWear_FiLM/</code>, then open ` +
+        `<code class="inline">http://localhost:8000/dashboard/</code>.`);
+    });
 })();

@@ -78,6 +78,12 @@
 
   .wrap { max-width: 1180px; margin: 0 auto; padding: 0 24px 80px; }
 
+  /* ---------- load banner ---------- */
+  .load-banner { margin: 20px 0; padding: 12px 16px; border-radius: 10px; font-size: 13px; line-height: 1.55; }
+  .load-banner.info { background: var(--surface-2); color: var(--text-secondary); border: 1px solid var(--border); }
+  .load-banner.error { background: color-mix(in srgb, var(--critical) 10%, var(--surface)); color: var(--critical); border: 1px solid color-mix(in srgb, var(--critical) 30%, transparent); }
+  .load-banner code.inline { color: inherit; }
+
   /* ---------- header ---------- */
   header.top {
     border-bottom: 1px solid var(--border);
@@ -127,6 +133,16 @@
   .segmented button:focus-visible, button:focus-visible, a:focus-visible, th[tabindex]:focus-visible {
     outline: 2px solid var(--series-plain); outline-offset: 2px;
   }
+  .toolbar-sep { width: 1px; height: 20px; background: var(--border-strong); flex: none; }
+
+  /* ---------- tab panels ---------- */
+  .tab-panel[hidden] { display: none; }
+
+  /* ---------- key/value path list (hyperparameters tab) ---------- */
+  .path-list { margin-top: 12px; display: flex; flex-direction: column; gap: 6px; }
+  .path-list .path-row { display: flex; gap: 8px; font-size: 12px; }
+  .path-list .path-row b { color: var(--text-secondary); font-weight: 600; flex: none; min-width: 100px; }
+  .path-list .path-row code { color: var(--text-primary); word-break: break-all; }
 
   /* ---------- sections ---------- */
   section { margin-top: 34px; }

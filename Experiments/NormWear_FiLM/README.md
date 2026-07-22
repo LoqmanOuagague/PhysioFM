@@ -153,6 +153,7 @@ CPUs actually available to the process, and peak RSS — and saves it under a to
 | `experiment.py` | Shared core: builds/caches embeddings, trains+evaluates one probe on a given train/test row pool, and runs a full class-holdout or LOSO experiment. Used by both scripts below so they share one code path. |
 | `train_linear_probe.py` | CLI for a *single* (split × FiLM) run — useful for iterating on one configuration. |
 | `run_ablation.py` | Runs all 8 experiments in one pass (sharing one embedding cache across them) and saves metrics to `results/ablation_results.json`. |
+| `dashboard/` | Static HTML/JS/CSS dashboard that visualizes `results/ablation_results.json` (see "Dashboard" below). |
 
 ## Running it
 
@@ -177,6 +178,30 @@ experiments; delete that directory (or individual sample files) to force a re-en
 / `train_linear_probe.py --help` for the full list of hyperparameters
 (hidden dim, dropout, max epochs, early-stopping patience/min_delta, learning rate, batch size, device, selector
 temperature, ...).
+
+## Dashboard
+
+`dashboard/index.html` is a static, dependency-free dashboard (SVG charts, no build step) that visualizes every
+run in `results/ablation_results.json`: KPI tiles, a grouped bar chart (plain vs. FiLM per split), a per-subject
+LOSO breakdown, a FiLM-minus-plain delta grid across all metrics, a metric-vs-parameter-count scatter plot, and a
+sortable table of all 8 runs.
+
+It loads `results/ablation_results.json` itself at page load (`dashboard.js` `fetch`es it directly and derives
+each run's trainable-parameter count client-side, using the same closed-form arithmetic as
+`probe_model._matched_hidden_dim`/`_film_and_selector_param_count`, since the saved JSON records each run's
+hyperparameter-search `hidden_dim` but not its resulting parameter count) — re-running `run_ablation.py` and
+refreshing the page is enough to pick up new results, no manual copy-paste step.
+
+Browsers block `fetch` against `file://` paths, so the dashboard must be served over HTTP rather than opened
+directly:
+
+```bash
+cd Experiments/NormWear_FiLM && python3 -m http.server 8000
+# then open http://localhost:8000/dashboard/
+```
+
+If it's opened as a local file instead, the dashboard shows a banner explaining why the load failed rather than
+silently displaying nothing.
 
 ## Caveats
 
