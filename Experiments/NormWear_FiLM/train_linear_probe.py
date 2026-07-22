@@ -39,11 +39,14 @@ Pipeline:
      so the two arms are compared at equal capacity.
   6. Unless --no-tune, hyperparameters (hidden_dim, dropout, lr, weight_decay,
      batch_size, patience, and min_delta -- the latter two controlling early
-     stopping on train_loss, see experiment.ProbeConfig) are searched by
+     stopping on validation loss, see experiment.ProbeConfig) are searched by
      `experiment.hyperparameter_search` on a validation split carved out of
      the training set only (--eval_mode class_holdout: --val_frac of
      train_rows; --eval_mode loso: one reserved subject) -- the test set/fold
-     is never used to pick hyperparameters. selector_temperature is fixed
+     is never used to pick hyperparameters. That same validation split is
+     reused (regardless of --no-tune) as the final fit's early-stopping
+     signal, so the final fit trains on the remaining training rows rather
+     than the complete training set. selector_temperature is fixed
      (not searched); see --selector_temperature.
 """
 
@@ -81,9 +84,9 @@ def get_args_parser():
     parser.add_argument("--dropout", type=float, default=0.3)
     parser.add_argument("--batch_size", type=int, default=64)
     parser.add_argument("--embed_batch_size", type=int, default=16, help="Batch size used only for the one-off NormWear encoding pass")
-    parser.add_argument("--epochs", type=int, default=30, help="Upper bound on training epochs; training early-stops once train_loss stops improving (see --patience)")
-    parser.add_argument("--patience", type=int, default=10, help="Epochs of no train_loss improvement (beyond --min_delta) before early-stopping")
-    parser.add_argument("--min_delta", type=float, default=1e-4, help="Smallest train_loss decrease that counts as an improvement, for early stopping")
+    parser.add_argument("--epochs", type=int, default=30, help="Upper bound on training epochs; training early-stops once validation loss stops improving (see --patience)")
+    parser.add_argument("--patience", type=int, default=10, help="Epochs of no validation-loss improvement (beyond --min_delta) before early-stopping")
+    parser.add_argument("--min_delta", type=float, default=1e-4, help="Smallest validation-loss decrease that counts as an improvement, for early stopping")
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--weight_decay", type=float, default=1e-4)
     parser.add_argument("--seed", type=int, default=42)

@@ -16,7 +16,9 @@ wesad_dataset.TASK_CLASSES), and varies along two independent axes:
 That's 3 x 2 (class-holdout) + 1 x 2 (LOSO) = 8 runs total. Both splits are
 pooled across WESAD's own train/test manifests and re-split from scratch for
 this study (see wesad_dataset.class_holdout_split / loso_folds) -- see
-README.md for why.
+README.md for why. Use --loso_only to skip the class-holdout splits and only
+run LOSO, and/or --film_only to skip the plain (non-FiLM) arms and only run
+the FiLM-conditioned ones.
 
 The --no-use_film arm isn't a plain linear probe: probe_model.py widens its
 classifier so its trainable parameter count matches a same-hidden_dim FiLM
@@ -26,13 +28,16 @@ conditioning help" with "does having more parameters help".
 
 Unless --no-tune, hyperparameters (hidden_dim, dropout, lr, weight_decay,
 batch_size, patience, and min_delta -- the latter two controlling early
-stopping on train_loss, see experiment.ProbeConfig) are searched
+stopping on validation loss, see experiment.ProbeConfig) are searched
 independently for each of the 8 experiments above, by
 experiment.hyperparameter_search, on a validation split carved out of that
 experiment's *training* set only -- class-holdout: --val_frac of train_rows;
 LOSO: one reserved subject (see wesad_dataset.carve_validation_split /
-loso_validation_split) -- never the test set/fold. selector_temperature is
-fixed (not searched); see --selector_temperature.
+loso_validation_split) -- never the test set/fold. That same validation
+split is reused (regardless of --no-tune) as the final fit's early-stopping
+signal, so the final fit trains on the remaining training rows rather than
+the complete training set -- see experiment.train_probe's val_rows.
+selector_temperature is fixed (not searched); see --selector_temperature.
 
 Every experiment reports Accuracy, macro-Precision, macro-Recall, macro-F1
 and macro-averaged (one-vs-one) ROC AUC on its held-out data; the FiLM
@@ -66,6 +71,8 @@ DEFAULT_RESULTS_PATH = os.path.join(THIS_DIR, "results", "ablation_results.json"
 def get_args_parser():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--data_root", default=DEFAULT_DATA_ROOT)
+    parser.add_argument("--loso_only", action="store_true", help="Skip the class-holdout experiments and only run the 2 LOSO runs (plain + FiLM)")
+    parser.add_argument("--film_only", action="store_true", help="Skip the plain (non-FiLM) arms and only run the FiLM-conditioned experiments")
     parser.add_argument("--train_frac", type=float, default=0.8, help="Class-holdout experiment train fraction (of the two non-novel classes)")
     parser.add_argument("--tune", action=argparse.BooleanOptionalAction, default=True, help="Search hyperparameters independently per experiment on a validation split carved from its training set (never the test set/fold)")
     parser.add_argument("--val_frac", type=float, default=0.2, help="class_holdout only: fraction of train_rows carved out as the tuning validation set")
@@ -77,9 +84,9 @@ def get_args_parser():
     parser.add_argument("--dropout", type=float, default=0.3)
     parser.add_argument("--batch_size", type=int, default=64)
     parser.add_argument("--embed_batch_size", type=int, default=16, help="Batch size used only for the one-off NormWear encoding pass")
-    parser.add_argument("--epochs", type=int, default=1000, help="Upper bound on training epochs; training early-stops once train_loss stops improving (see --patience)")
-    parser.add_argument("--patience", type=int, default=50, help="Epochs of no train_loss improvement (beyond --min_delta) before early-stopping")
-    parser.add_argument("--min_delta", type=float, default=1e-4, help="Smallest train_loss decrease that counts as an improvement, for early stopping")
+    parser.add_argument("--epochs", type=int, default=1000, help="Upper bound on training epochs; training early-stops once validation loss stops improving (see --patience)")
+    parser.add_argument("--patience", type=int, default=50, help="Epochs of no validation-loss improvement (beyond --min_delta) before early-stopping")
+    parser.add_argument("--min_delta", type=float, default=1e-4, help="Smallest validation-loss decrease that counts as an improvement, for early stopping")
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--weight_decay", type=float, default=1e-4)
     parser.add_argument("--seed", type=int, default=42)
@@ -165,21 +172,24 @@ def main():
     cache = build_embedding_cache(rows, args.data_root, normwear, args.device, args.embed_batch_size, embed_cache_dir)
     del normwear  # shared across every experiment below; the frozen backbone isn't needed again
 
+    film_variants = (True,) if args.film_only else (False, True)
+
     results = {}
-    n_total = 3 * 2 + 2
+    n_total = (1 if args.loso_only else 4) * len(film_variants)
     step = 0
 
-    for novel_class in TASK_CLASSES:
-        for use_film in (False, True):
-            step += 1
-            tag = "FiLM" if use_film else "plain"
-            print(f"\n[{step}/{n_total}] class-holdout (novel_class={novel_class}), {tag} linear probe")
-            results[f"class_holdout_novel={novel_class}_{'film' if use_film else 'plain'}"] = run_class_holdout_experiment(
-                manifest, rows, cache, make_config(args, use_film=use_film), manifest.classes, novel_class, args.train_frac, args.seed,
-                tune=args.tune, val_frac=args.val_frac, n_trials=args.n_trials, search_epochs=args.search_epochs,
-            )
+    if not args.loso_only:
+        for novel_class in TASK_CLASSES:
+            for use_film in film_variants:
+                step += 1
+                tag = "FiLM" if use_film else "plain"
+                print(f"\n[{step}/{n_total}] class-holdout (novel_class={novel_class}), {tag} linear probe")
+                results[f"class_holdout_novel={novel_class}_{'film' if use_film else 'plain'}"] = run_class_holdout_experiment(
+                    manifest, rows, cache, make_config(args, use_film=use_film), manifest.classes, novel_class, args.train_frac, args.seed,
+                    tune=args.tune, val_frac=args.val_frac, n_trials=args.n_trials, search_epochs=args.search_epochs,
+                )
 
-    for use_film in (False, True):
+    for use_film in film_variants:
         step += 1
         tag = "FiLM" if use_film else "plain"
         print(f"\n[{step}/{n_total}] leave-one-subject-out, {tag} linear probe")

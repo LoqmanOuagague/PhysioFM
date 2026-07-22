@@ -92,14 +92,16 @@ Comparing each class-holdout FiLM run against its plain counterpart, and LOSO-Fi
 actual ablation: if FiLM helps on some novel classes but not others, or helps class-holdout but not LOSO, that's
 evidence about *what kind* of generalization the personal baseline is (or isn't) buying.
 
-## Training stops itself: early stopping on train_loss
+## Training stops itself: early stopping on validation loss
 
 Training no longer runs for a fixed number of epochs. `--epochs` is now only an **upper bound**: every fit
-(hyperparameter-search trials included) tracks the best `train_loss` seen so far and stops as soon as it hasn't
-improved by at least `--min_delta` for `--patience` epochs in a row (`experiment.train_probe`). This applies
-uniformly to class-holdout, LOSO, and every hyperparameter-search trial, since they all go through the same
-training loop. `--patience` and `--min_delta` are themselves searched (see below), so each experiment can settle
-on its own stopping point rather than sharing one hand-picked epoch count.
+(hyperparameter-search trials included) tracks the best `val_loss` seen so far -- computed every epoch on a
+validation split carved out of the *training* pool, never the test set/fold (see `train_probe`'s `val_rows`) --
+and stops as soon as it hasn't improved by at least `--min_delta` for `--patience` epochs in a row
+(`experiment.train_probe`). Training only falls back to `train_loss` for stopping when no validation split is
+available at all. This applies uniformly to class-holdout, LOSO, and every hyperparameter-search trial, since
+they all go through the same training loop. `--patience` and `--min_delta` are themselves searched (see below),
+so each experiment can settle on its own stopping point rather than sharing one hand-picked epoch count.
 
 ## Hyperparameter tuning (and where the validation set comes from)
 
@@ -108,30 +110,36 @@ Unless `--no-tune`, every one of the 8 experiments above searches its own hyperp
 HP_SEARCH_SPACE`) — by random search (`experiment.hyperparameter_search`, `--n_trials` trials, each a short fit of
 `--search_epochs` epochs) that maximizes **macro-F1** on a validation set carved **only out of that experiment's
 training set**. `selector_temperature` is fixed at `--selector_temperature` (not searched — see Caveats) for every
-trial. The test set/fold is never touched until the winning config is refit (for the full `--epochs`, still
-subject to early stopping) on the complete training set and scored once.
+trial. The test set/fold is never touched until the winning config is refit and scored once.
+
+That same validation split is also reused (regardless of `--no-tune`, since it's carved either way) as the final
+fit's early-stopping signal (see "Training stops itself" above) — so the final fit trains on the training pool
+*minus* the validation split, not the complete training set.
 
 Where the validation set comes from depends on the split, since a class-holdout run has one fixed training pool
 but a LOSO run doesn't:
 
 - **Class-holdout**: `wesad_dataset.carve_validation_split` takes `--val_frac` (default 20%) of `train_rows`,
-  stratified by condition, as validation; the search trains on the rest.
+  stratified by condition, as validation; both the search and the final fit train on the rest.
 - **LOSO**: there's no single training set to carve a row-fraction out of — the axis under test is subject
   generalization, so the validation unit is a whole subject too. `wesad_dataset.loso_validation_split` reserves
   one participant (chosen deterministically from `--seed`) as the validation fold: the search trains on every
   *other* subject and scores macro-F1 on the reserved one. Tuning runs once per experiment, not once per LOSO
   test fold (which would multiply the search cost ~15x for no benefit, since all folds of the same experiment
-  should use the same hyperparameters to remain comparable). Once tuning is done, that reserved subject rejoins
-  the pool and takes its normal turn as a test fold in the real evaluation loop — by then no reported test metric
-  has influenced which hyperparameters were picked.
+  should use the same hyperparameters to remain comparable). That same reserved participant is then reused as
+  every fold's early-stopping validation subject too (trained on, not scored on, in every other fold's final fit)
+  — except the one fold where it's itself the held-out test subject, where a fresh validation participant is
+  carved from that fold's training pool instead. By the time any fold's final fit runs, no reported test metric
+  has influenced which hyperparameters were picked or when training stopped.
 
 Both experiment result dicts (and the saved JSON) include the winning `config` and the full `hp_search` trial
 history (each trial's `val_f1_macro`).
 
 ## Per-epoch loss logging (LOSO)
 
-Every LOSO fold's final fit (not the hyperparameter-search trials) now logs `train_loss` and `val_loss` — the
-held-out fold's loss, evaluated every epoch — to the console (`epoch N/E  train_loss=...  val_loss=...`), and the
+Every LOSO fold's final fit (not the hyperparameter-search trials) logs `train_loss` and `val_loss` — the
+fold's early-stopping validation participant's loss (see "Hyperparameter tuning" above), evaluated every epoch,
+and the actual signal early stopping acts on — to the console (`epoch N/E  train_loss=...  val_loss=...`), and the
 full per-fold curves are saved into the result under `loss_history` (`{uid: [{epoch, train_loss, val_loss}, ...]}`),
 alongside the existing `per_fold` metrics.
 

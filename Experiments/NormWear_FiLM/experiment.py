@@ -53,9 +53,9 @@ class ProbeConfig:
     hidden_dim: int = 256
     dropout: float = 0.3
     batch_size: int = 64
-    epochs: int = 30  # upper bound; training early-stops once train_loss stops improving (see `patience`)
-    patience: int = 10  # epochs of no train_loss improvement (beyond min_delta) before stopping
-    min_delta: float = 1e-4  # smallest train_loss decrease that counts as an improvement
+    epochs: int = 30  # upper bound; training early-stops once val_loss stops improving (see `patience`; falls back to train_loss if no validation split is passed to train_probe)
+    patience: int = 10  # epochs of no val_loss improvement (beyond min_delta) before stopping
+    min_delta: float = 1e-4  # smallest val_loss decrease that counts as an improvement
     lr: float = 1e-3
     weight_decay: float = 1e-4
     seed: int = 42
@@ -193,6 +193,7 @@ def train_probe(
     config: ProbeConfig,
     classes: list[str],
     verbose: bool = True,
+    val_rows: pd.DataFrame | None = None,
     track_val_loss: bool = False,
 ) -> tuple[NormWearFiLMProbe, dict[str, float], list[dict[str, float]] | None]:
     """Trains one probe (optionally +FiLM, with a learnable baseline-duration
@@ -200,13 +201,19 @@ def train_probe(
     pools of `wesad_dataset.task_rows` (already filtered to the 3-class task)
     however the caller split them -- a class-holdout split or one LOSO fold.
 
-    When `track_val_loss`, `test_rows`' loss is also computed every epoch
-    (in addition to train_loss) and both are printed and returned as
-    `loss_history` (a list of {epoch, train_loss, val_loss}); otherwise
-    `loss_history` is None."""
+    `val_rows`, when given, must be a slice of the *training* pool (never
+    `test_rows`) held out from `train_rows` by the caller -- its loss is
+    computed every epoch and used as the early-stopping criterion instead of
+    train_loss (see the loop below). Without it, early stopping falls back to
+    train_loss, since there's no leakage-free signal to stop on otherwise.
+
+    When `track_val_loss`, both losses are printed and returned as
+    `loss_history` (a list of {epoch, train_loss} + {val_loss} if `val_rows`
+    is given); otherwise `loss_history` is None."""
     set_seed(config.seed)
 
-    subject_ids = sorted(pd.concat([train_rows["uid"], test_rows["uid"]]).unique())
+    uid_cols = [train_rows["uid"], test_rows["uid"]] + ([val_rows["uid"]] if val_rows is not None else [])
+    subject_ids = sorted(pd.concat(uid_cols).unique())
     uid_to_idx = {uid: i for i, uid in enumerate(subject_ids)}
     if config.use_film:
         _, baseline_seq_all, baseline_mask_all = build_baseline_sequences(manifest, cache, config.r_minutes_max, subject_ids)
@@ -222,6 +229,11 @@ def train_probe(
     # (bites some LOSO folds depending on how len(train_rows) % batch_size falls).
     train_loader = DataLoader(TensorDataset(train_embed, train_subj, train_labels), batch_size=config.batch_size, shuffle=True, drop_last=True)
     test_loader = DataLoader(TensorDataset(test_embed, test_subj, test_labels), batch_size=config.batch_size, shuffle=False)
+
+    val_loader = None
+    if val_rows is not None:
+        val_embed, val_subj, val_labels = build_split_arrays(val_rows, cache, uid_to_idx, classes)
+        val_loader = DataLoader(TensorDataset(val_embed, val_subj, val_labels), batch_size=config.batch_size, shuffle=False)
 
     model = NormWearFiLMProbe(
         num_channels=num_channels,
@@ -241,8 +253,9 @@ def train_probe(
     criterion = nn.CrossEntropyLoss()
 
     loss_history: list[dict[str, float]] | None = [] if track_val_loss else None
-    best_train_loss = float("inf")
+    best_stop_loss = float("inf")
     epochs_without_improvement = 0
+    stop_metric = "val_loss" if val_loader is not None else "train_loss"
 
     for epoch in range(config.epochs):
         model.train()
@@ -262,25 +275,36 @@ def train_probe(
             total_loss += loss.item() * len(labels)
         train_loss = total_loss / len(train_loader.dataset)
 
+        val_loss = None
+        if val_loader is not None:
+            val_loss = compute_loss(model, val_loader, baseline_seq_all, baseline_mask_all, config.device, criterion)
+        stop_loss = val_loss if val_loss is not None else train_loss
+
         if track_val_loss:
-            val_loss = compute_loss(model, test_loader, baseline_seq_all, baseline_mask_all, config.device, criterion)
-            loss_history.append({"epoch": epoch + 1, "train_loss": train_loss, "val_loss": val_loss})
-            print(f"  epoch {epoch + 1}/{config.epochs}  train_loss={train_loss:.4f}  val_loss={val_loss:.4f}")
+            entry = {"epoch": epoch + 1, "train_loss": train_loss}
+            msg = f"  epoch {epoch + 1}/{config.epochs}  train_loss={train_loss:.4f}"
+            if val_loss is not None:
+                entry["val_loss"] = val_loss
+                msg += f"  val_loss={val_loss:.4f}"
+            loss_history.append(entry)
+            print(msg)
         elif verbose and ((epoch + 1) % 5 == 0 or epoch == config.epochs - 1):
             msg = f"  epoch {epoch + 1}/{config.epochs}  train_loss={train_loss:.4f}"
+            if val_loss is not None:
+                msg += f"  val_loss={val_loss:.4f}"
             if config.use_film:
                 msg += f"  effective_r_minutes={model.effective_baseline_minutes():.3f}"
             print(msg)
 
-        if train_loss < best_train_loss - config.min_delta:
-            best_train_loss = train_loss
+        if stop_loss < best_stop_loss - config.min_delta:
+            best_stop_loss = stop_loss
             epochs_without_improvement = 0
         else:
             epochs_without_improvement += 1
         if epochs_without_improvement >= config.patience:
             if verbose or track_val_loss:
                 print(f"  Early stopping at epoch {epoch + 1}/{config.epochs} "
-                      f"(train_loss hasn't improved by >= {config.min_delta} for {config.patience} epochs)")
+                      f"({stop_metric} hasn't improved by >= {config.min_delta} for {config.patience} epochs)")
             break
 
     metrics = evaluate(model, test_loader, baseline_seq_all, baseline_mask_all, config.device, len(classes))
@@ -339,7 +363,7 @@ def hyperparameter_search(
     history: list[dict] = []
     best_config, best_f1 = None, -1.0
     for i, cfg in enumerate(candidates):
-        _, metrics, _ = train_probe(search_train_rows, val_rows, manifest, cache, cfg, classes, verbose=False)
+        _, metrics, _ = train_probe(search_train_rows, val_rows, manifest, cache, cfg, classes, verbose=False, val_rows=val_rows)
         f1 = metrics["f1_macro"]
         tag = ", ".join(f"{k}={getattr(cfg, k)}" for k in HP_SEARCH_SPACE if k != "hidden_dim")
         print(f"  [hp search {i + 1}/{len(candidates)}] hidden_dim={cfg.hidden_dim}, {tag} -> val_f1_macro={f1:.4f}")
@@ -363,26 +387,26 @@ def run_class_holdout_experiment(
     between train and test); `novel_class` is withheld from training
     entirely and appears only in the test set.
 
-    When `tune`, hyperparameters are searched independently for this
-    experiment: `val_frac` of `train_rows` (stratified by class) is carved
-    out as a validation set (see `wesad_dataset.carve_validation_split`),
-    the search trains on the remaining 1 - val_frac and picks whichever
-    config scores highest validation macro-F1, and only then is the winning
-    config refit on the *full* train_rows and scored on the untouched
-    test_rows -- the test set never influences which hyperparameters are
-    chosen."""
+    `val_frac` of `train_rows` (stratified by class) is always carved out as
+    a validation set (see `wesad_dataset.carve_validation_split`), regardless
+    of `tune`: when `tune`, it's what hyperparameter_search maximizes
+    validation macro-F1 on (never the test set); either way, it's reused as
+    the final fit's early-stopping signal (see train_probe's `val_rows`), so
+    the final fit trains on the remaining 1 - val_frac rather than the full
+    train_rows -- the test set never influences which hyperparameters are
+    chosen nor when training stops."""
     train_rows, test_rows = class_holdout_split(rows, novel_class, train_frac=train_frac, seed=split_seed)
+    search_train_rows, val_rows = carve_validation_split(train_rows, val_frac=val_frac, seed=split_seed)
 
     hp_search_history = None
     if tune:
-        search_train_rows, val_rows = carve_validation_split(train_rows, val_frac=val_frac, seed=split_seed)
         print(f"HP search: {len(search_train_rows)} search-train / {len(val_rows)} val windows (of {len(train_rows)} train)")
         config, hp_search_history = hyperparameter_search(
             search_train_rows, val_rows, manifest, cache, config, classes, config.use_film,
             n_trials=n_trials, search_epochs=search_epochs, seed=split_seed,
         )
 
-    _, metrics, _ = train_probe(train_rows, test_rows, manifest, cache, config, classes)
+    _, metrics, _ = train_probe(search_train_rows, test_rows, manifest, cache, config, classes, val_rows=val_rows)
     result = {
         "mode": "class_holdout",
         "novel_class": novel_class,
@@ -403,19 +427,24 @@ def run_loso_experiment(
     """Leave-one-subject-out cross-validation: one fold per subject, trained
     on every other subject's windows.
 
-    When `tune`, hyperparameters are searched once for this experiment
-    (not once per fold, which would multiply cost by the number of subjects):
-    one subject (a "folder"/participant) is reserved as a validation fold
-    (see `wesad_dataset.loso_validation_split`), the search trains on every
-    other subject and picks whichever config scores highest macro-F1 on the
-    reserved subject, and only then does the real per-subject evaluation loop
-    below run with the winning config. That reserved subject still takes its
-    normal turn as a test fold in the loop -- by then tuning is finished, so
-    no reported test metric was used to choose hyperparameters."""
+    One subject (`val_uid`, chosen deterministically from `tune_seed`/
+    `config.seed`) is always reserved as a validation participant (see
+    `wesad_dataset.loso_validation_split`), regardless of `tune`: when `tune`,
+    hyperparameters are searched once for this experiment (not once per fold,
+    which would multiply cost by the number of subjects) by training on every
+    *other* subject and picking whichever config scores highest macro-F1 on
+    `val_uid`. Either way, each fold's final fit reuses `val_uid`'s rows as
+    its early-stopping validation set (see train_probe's `val_rows`) --
+    except the one fold where `val_uid` itself is the held-out test subject,
+    where a fresh validation participant is carved from that fold's training
+    pool instead, since `val_uid` isn't available to train on there. No
+    reported test metric ever influences which hyperparameters are chosen or
+    when training stops."""
+    tune_seed = config.seed if tune_seed is None else tune_seed
+    val_uid, search_train_rows, val_rows = loso_validation_split(rows, seed=tune_seed)
+
     hp_search_history = None
     if tune:
-        tune_seed = config.seed if tune_seed is None else tune_seed
-        val_uid, search_train_rows, val_rows = loso_validation_split(rows, seed=tune_seed)
         print(f"HP search: validation participant={val_uid} ({len(val_rows)} windows), "
               f"search-train={len(search_train_rows)} windows across {search_train_rows['uid'].nunique()} subjects")
         config, hp_search_history = hyperparameter_search(
@@ -427,8 +456,17 @@ def run_loso_experiment(
     fold_loss_history: dict[str, list[dict[str, float]]] = {}
     fold_metrics: list[dict[str, float]] = []
     for uid, train_rows, test_rows in loso_folds(rows):
+        if uid == val_uid:
+            # val_uid is this fold's held-out test subject, so it can't also
+            # serve as this fold's validation set -- carve a fresh one.
+            _, fold_train_rows, fold_val_rows = loso_validation_split(train_rows, seed=tune_seed)
+        else:
+            fold_val_rows = train_rows[train_rows["uid"] == val_uid].reset_index(drop=True)
+            fold_train_rows = train_rows[train_rows["uid"] != val_uid].reset_index(drop=True)
         print(f"LOSO fold: held-out subject {uid} ({len(test_rows)} windows)")
-        _, metrics, loss_history = train_probe(train_rows, test_rows, manifest, cache, config, classes, verbose=False, track_val_loss=True)
+        _, metrics, loss_history = train_probe(
+            fold_train_rows, test_rows, manifest, cache, config, classes, verbose=False, track_val_loss=True, val_rows=fold_val_rows,
+        )
         per_fold[uid] = metrics
         fold_loss_history[uid] = loss_history
         fold_metrics.append(metrics)

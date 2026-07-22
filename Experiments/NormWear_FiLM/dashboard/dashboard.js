@@ -1,6 +1,6 @@
 (function () {
   "use strict";
-  const RESULTS_URL = "../results/ablation_results.json";
+  const RESULTS_URL = "../results/ablation_results_green_performance.json";
   let DATA = null;
   const SVGNS = "http://www.w3.org/2000/svg";
 
